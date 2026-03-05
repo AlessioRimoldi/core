@@ -8,9 +8,19 @@ Docker compose brings up the following services:
 - MLFlow, on localhost:5000
 
 ## Commands and Usage
-From the project root folder. Bring-up of the whole stack:S
+First install the necessary VSCode extensions: 
+```
+bash /scripts/vscode.setup.bash
+```
+Then bring-up of the whole stack:
 ```
 xhost +local:docker
 cd docker
 docker compose up
 ```
+
+The stack is currently formed by three containers:
+
+- env: containing ros2_control and the mujoco simulation environment. This setup enables for deterministic behavior by avoiding publish/subscribe paradigms.
+- redis: Contains the redis database
+- mlflow: Experiment visualization and data analysis
