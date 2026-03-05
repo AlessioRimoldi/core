@@ -1,0 +1,51 @@
+#================================================================
+# CORE Training & Simulation Environment 
+#================================================================
+# Usage:
+#
+#================================================================
+services:
+  redis: 
+      image: redis:8.6.1
+      container_name: redis
+      ports:
+        - '6379:6379'
+      volumes:
+        - ./data/redis-data:/data
+      environment:
+        - REDIS_ARGS=--requirepass $REDIS_PASS --appendonly yes --loglevel warningS
+      restart: unless-stopped
+
+  mlflow:
+      image: ghcr.io/mlflow/mlflow:v2.16.0
+      container_name: mlflow
+      command: mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri sqlite:////mlruns/mlflow.db --default-artifact-root /mlruns
+      volumes: 
+        - ./data/mlruns:/mlruns
+      ports: 
+        - '5000:5000'
+      restart: unless-stopped
+  
+  env:
+    container_name: env
+    build:
+      dockerfile: ./Dockerfile
+    stdin_open: true
+    tty: true
+    volumes: 
+        - /tmp/.X11-unix:/tmp/.X11-unix
+    environment:
+        - DISPLAY=${DISPLAY}
+        - XDG_RUNTIME_DIR=/tmp/runtime-root
+        - SDL_AUDIODRIVER=dummy
+    ports:
+      - '50051:50051'
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities:  [gpu]
+
