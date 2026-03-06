@@ -4,6 +4,10 @@
 # Usage:
 #
 #================================================================
+networks:
+  core:
+    driver: bridge
+
 services:
   redis: 
       image: redis:8.6.1
@@ -15,6 +19,8 @@ services:
       environment:
         - REDIS_ARGS=--requirepass $REDIS_PASS --appendonly yes --loglevel warningS
       restart: unless-stopped
+      networks:
+        - core
 
   mlflow:
       image: ghcr.io/mlflow/mlflow:v2.16.0
@@ -25,6 +31,8 @@ services:
       ports: 
         - '5000:5000'
       restart: unless-stopped
+      networks:
+        - core
   
   env:
     container_name: env
@@ -41,6 +49,11 @@ services:
     ports:
       - '50051:50051'
     restart: unless-stopped
+    depends_on:
+      - redis
+      - mlflow
+    networks:
+      - core
     deploy:
       resources:
         reservations:

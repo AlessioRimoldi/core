@@ -12,9 +12,9 @@ RUN apt-get update && apt-get install -y \
 # Python virtual environment
 RUN python3 -m venv core
 ENV PATH="/core/bin:$PATH"
-RUN pip install mujoco empy lark numpy catkin_pkg
+RUN pip install mujoco empy lark numpy catkin_pkg stable-baselines3 gymnasium mlflow redis
 
-# ros2_control framework 
+# ros2_control framework
 RUN apt-get update && apt-get install -y \
     ros-jazzy-ros2-control \
     ros-jazzy-ros2-controllers \
@@ -33,6 +33,12 @@ RUN mkdir -p /ros2_ws/src && \
     cd /ros2_ws && \
     . /opt/ros/jazzy/setup.sh && \
     colcon build --packages-up-to mujoco_ros2_control
+
+# Utils
+RUN apt-get update && apt-get install -y \
+    iputils-ping \
+    redis-tools \
+    && rm -rf /var/lib/apt/lists/*
 
 # Setup bashrc for interactive shells
 RUN echo 'source /opt/ros/jazzy/setup.bash' >> /root/.bashrc && \
