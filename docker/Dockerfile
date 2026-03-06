@@ -37,7 +37,8 @@ RUN mkdir -p /ros2_ws/src && \
 # Setup bashrc for interactive shells
 RUN echo 'source /opt/ros/jazzy/setup.bash' >> /root/.bashrc && \
     echo '[ -f /ros2_ws/install/setup.bash ] && source /ros2_ws/install/setup.bash' >> /root/.bashrc && \
-    echo 'export PATH="/core/bin:$PATH"' >> /root/.bashrc
+    echo 'export PATH="/core/bin:$PATH"' >> /root/.bashrc && \
+    sed -i 's/#force_color_prompt=yes/force_color_prompt=yes/' /root/.bashrc
 
 COPY ./entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
