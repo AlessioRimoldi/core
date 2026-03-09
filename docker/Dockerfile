@@ -26,19 +26,30 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # ros2_control mujoco binding, caveat: main tracks the latest ROS release, it will break in th future.
-RUN mkdir -p /ros2_ws/src && \
-    cd /ros2_ws/src && \
+RUN mkdir -p /ros2_ws/core/thirdparty && \
+    cd /ros2_ws/core/thirdparty && \
     git clone https://github.com/ros-controls/mujoco_ros2_control.git -b main && \  
     git clone https://github.com/pal-robotics/mujoco_vendor.git -b master && \
     cd /ros2_ws && \
     . /opt/ros/jazzy/setup.sh && \
     colcon build --packages-up-to mujoco_ros2_control
 
+# Parol6 urdfs + meshes only sparse checkout (temporary solution)
+RUN mkdir -p /ros2_ws/core/thirdparty/parol6_upstream && \
+    cd /ros2_ws/core/thirdparty/parol6_upstream && \
+    git init && \
+    git remote add origin https://github.com/PCrnjak/PAROL6-Desktop-robot-arm.git && \
+    git config core.sparseCheckout true && \
+    echo "PAROL6_URDF/" >> .git/info/sparse-checkout && \
+    git pull --depth 1 origin main
+
 # Utils
 RUN apt-get update && apt-get install -y \
     iputils-ping \
     redis-tools \
     && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /ros2_ws/core/src
 
 # Setup bashrc for interactive shells
 RUN echo 'source /opt/ros/jazzy/setup.bash' >> /root/.bashrc && \

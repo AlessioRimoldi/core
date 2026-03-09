@@ -42,6 +42,7 @@ services:
     tty: true
     volumes: 
         - /tmp/.X11-unix:/tmp/.X11-unix
+        - ../src:/ros2_ws/core/src
     environment:
         - DISPLAY=${DISPLAY}
         - XDG_RUNTIME_DIR=/tmp/runtime-root
