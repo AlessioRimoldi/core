@@ -47,6 +47,7 @@ RUN mkdir -p /ros2_ws/core/thirdparty/parol6_upstream && \
 RUN apt-get update && apt-get install -y \
     iputils-ping \
     redis-tools \
+    libabsl-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /ros2_ws/core/src
