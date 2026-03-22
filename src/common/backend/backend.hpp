@@ -36,6 +36,10 @@ namespace common {
         virtual bool read(std::array<MotorState, knumberOfMotors>);
         virtual void write(std::array<MotorState, knumberOfMotors>);
 
+        // Advance physics by one control period (no-op for real hardware)
         virtual void step(double) {};
+
+        // Notify backend when a controller is active 
+        virtual void set_controller_active(bool /*active*/) {};
     };
 }

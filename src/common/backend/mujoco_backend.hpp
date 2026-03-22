@@ -14,13 +14,16 @@ namespace common {
             MujocoBackend();
             ~MujocoBackend() override;
 
-            MujocoBackend(): logger_(rclcpp::get_logger("mujoco_backend")) {}
+            MujocoBackend(): logger_(rclcpp::get_logger("MujocoBackend")) {}
 
             hardware_interface::CallbackReturn init(const hardware_interface::HardwareInfo& info, rclcpp::Node::SharedPtr node) override;
             hardware_interface::CallbackReturn activate() override;
             hardware_interface::CallbackReturn deactivate() override;
 
             void step(double control_period) override;
+            void set_controller_active(bool active) override;
+
+            bool read(std::array<MotorState, knumberOfMotors>& states, int& mode_machine) override;
             void write(const std::array<MotorCommand, knumberOfMotors>& commands) override;
 
             // Mujoco control callback -- compute PD torques and writes to ctrl
@@ -45,13 +48,16 @@ namespace common {
             absl::Mutex control_mu_;
             std::unordered_map<std::string, double> pos_setpoint_;
             std::unordered_map<std::string, double> vel_setpoint_;
-            std::unordered_map<std::string, double> tau_feedforward;
+            std::unordered_map<std::string, double> tau_feedforward_;
             std::unordered_map<std::string, double> kp_;
             std::unordered_map<std::string, double> kd_;
 
             // Instability detection
             int control_tick_{0};
             bool unstable_{false};
+
+            // When false, control() holds pose vi agfrc bias instead of PD
+            bool controller_active_{false}; 
 
     };
 }
