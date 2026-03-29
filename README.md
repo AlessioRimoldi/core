@@ -86,6 +86,45 @@ source install/setup.bash
 
 Python changes (launch files, configs) take effect immediately thanks to `--symlink-install`.
 
+## RL Training
+
+A robot-agnostic RL pipeline using MuJoCo Python bindings directly (no ROS2 overhead) for training throughput, with ONNX export for deployment.
+
+```bash
+# Attach to the container
+docker exec -it env bash
+
+# Source the workspace (required for core_rl to be importable)
+source /ros2_ws/install/setup.bash
+
+# Train with PPO (8 parallel envs, streams to Redis + MLflow)
+python -m core_rl.train --robot parol6 --task joint_tracking --algo ppo --num-envs 8
+
+# Train with SAC, custom timesteps
+python -m core_rl.train --robot parol6 --task joint_tracking --algo sac \
+  --num-envs 16 --total-timesteps 2000000
+
+# Offline training (no Redis/MLflow)
+python -m core_rl.train --robot parol6 --task joint_tracking --algo ppo \
+  --no-redis --no-mlflow --total-timesteps 50000
+```
+
+Training outputs are saved to `/ros2_ws/core/models/` (mounted at `docker/data/models/` on the host) and include:
+- SB3 model checkpoint
+- VecNormalize statistics
+- ONNX policy (with normalizer, policy MLP, gravity compensation, and PD controller baked in)
+
+Monitor training at [http://localhost:5000](http://localhost:5000) (MLflow UI).
+
+### Adding a New Robot for RL
+
+1. Create `src/<robot>/<robot>_description/config/rl_config.yaml` declaring `urdf_path`, `mesh_dir`, `gains_path`, `joint_names`, and `uri_strip_patterns`
+2. See `src/parol6/parol6_description/config/rl_config.yaml` as a reference
+
+### Adding a New Task
+
+Create a Python file in `src/common/rl/core_rl/tasks/` with a `@register_task("name")` decorated class extending `BaseTask`. See `joint_tracking.py` as a reference.
+
 ## Stack Management
 
 ```bash

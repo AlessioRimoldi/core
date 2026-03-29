@@ -1,0 +1,24 @@
+# PAROL6 RL configuration.
+# Used by core_rl to resolve robot resources for training.
+
+# Path to the upstream URDF (relative to this file, or absolute)
+urdf_path: /ros2_ws/core/thirdparty/parol6_upstream/PAROL6_URDF/PAROL6/urdf/PAROL6.urdf
+
+# Directory containing mesh files (MuJoCo resolves relative to MJCF file)
+mesh_dir: /ros2_ws/core/thirdparty/parol6_upstream/PAROL6_URDF/PAROL6/meshes
+
+# PD gains file
+gains_path: ./parol6_gains.yaml
+
+# Joint names in order (must match URDF joint names)
+joint_names:
+  - L1
+  - L2
+  - L3
+  - L4
+  - L5
+  - L6
+
+# URI patterns to strip from URDF mesh filenames (MuJoCo needs bare filenames)
+uri_strip_patterns:
+  - "package://parol6/meshes/"

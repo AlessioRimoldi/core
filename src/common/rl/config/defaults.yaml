@@ -1,0 +1,63 @@
+# Default training configuration.
+# Override any key via --config on the CLI.
+
+training:
+  total_timesteps: 1_000_000
+  num_envs: 8
+  seed: 42
+  device: auto            # "auto", "cpu", or "cuda"
+
+env:
+  max_episode_steps: 500
+  control_dt: 0.01        # 100 Hz control loop (matches ros2_control)
+  physics_dt: 0.001       # MuJoCo timestep
+  render: false
+
+algorithms:
+  ppo:
+    learning_rate: 3.0e-4
+    n_steps: 2048
+    batch_size: 64
+    n_epochs: 10
+    gamma: 0.99
+    gae_lambda: 0.95
+    clip_range: 0.2
+    ent_coef: 0.0
+    vf_coef: 0.5
+    max_grad_norm: 0.5
+    policy: MlpPolicy
+    policy_kwargs:
+      net_arch: [256, 256]
+
+  sac:
+    learning_rate: 3.0e-4
+    buffer_size: 1_000_000
+    learning_starts: 10_000
+    batch_size: 256
+    tau: 0.005
+    gamma: 0.99
+    ent_coef: auto
+    policy: MlpPolicy
+    policy_kwargs:
+      net_arch: [256, 256]
+
+callbacks:
+  redis:
+    enabled: true
+    host: redis
+    port: 6379
+    password: ""           # Set via REDIS_PASS env var if needed
+    publish_freq: 100      # Log to Redis every N steps
+  mlflow:
+    enabled: true
+    tracking_uri: "http://mlflow:5000"
+    publish_freq: 1        # Log to MLflow every N rollouts
+
+export:
+  onnx: true
+  gravity_comp:
+    enabled: true
+    hidden_dims: [256, 256]
+    train_epochs: 50
+    train_lr: 1.0e-3
+    buffer_size: 500_000

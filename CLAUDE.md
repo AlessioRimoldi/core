@@ -143,12 +143,18 @@ steps_per_radian[i] = (6400.0 × gear_ratio[i]) / (2π)
 
 ```
 src/
-├── common/backend/
-│   ├── backend.hpp               — Abstract Backend base class + BodyPose struct
-│   ├── mujoco_backend.hpp        — MuJoCo simulation backend header
-│   └── mujoco_backend.cpp        — MuJoCo backend implementation + scene TF publisher
+├── common/
+│   ├── backend/
+│   │   ├── backend.hpp               — Abstract Backend base class + BodyPose struct
+│   │   ├── mujoco_backend.hpp        — MuJoCo simulation backend header
+│   │   └── mujoco_backend.cpp        — MuJoCo backend implementation + scene TF publisher
+│   └── rl/                           — Robot-agnostic RL training pipeline
+│       ├── CMakeLists.txt, package.xml
+│       ├── config/defaults.yaml
+│       └── core_rl/                  — Python package (see RL section below)
 └── parol6/
     ├── parol6_description/       — URDF/xacro, robot-specific config (PD gains)
+    │   └── config/rl_config.yaml — RL robot config (URDF path, joints, gains)
     ├── parol6_launch/            — Launch files, controller configuration
     │   ├── launch/parol6.launch.py
     │   ├── config/controllers.yaml
@@ -194,6 +200,108 @@ source install/setup.bash
 3. Create a hardware interface extending `hardware_interface::SystemInterface`
 4. Register via pluginlib; the hardware interface selects backend via `hardware_interface_type` param
 5. The `common::Backend` uses `std::vector` for joint state/commands, so it works with any joint count
+6. Add `rl_config.yaml` to `<robot>_description/config/` (see PAROL6 as example)
+
+---
+
+## RL Training Pipeline (`src/common/rl/`)
+
+A robot-agnostic RL training system. Uses MuJoCo Python bindings directly (no ROS2) for training throughput, then exports ONNX for deployment via `ros2_control`.
+
+### Architecture
+
+```
+train.py CLI → Algorithm (PPO/SAC/...) → SubprocVecEnv (N parallel MujocoRobotEnvs)
+                    ↓ callbacks                        ↓ MuJoCo Python (no ROS2)
+              Redis Streams + MLflow            PD control + gravity comp (NumPy)
+
+Export: DeployablePolicy(nn.Module) = Normalizer → Policy → GravCompNet → PDController → ONNX
+```
+
+### Usage
+
+```bash
+# Inside the Docker container (source workspace first)
+source /ros2_ws/install/setup.bash
+
+python -m core_rl.train --robot parol6 --task joint_tracking --algo ppo --num-envs 8
+
+# With overrides
+python -m core_rl.train --robot parol6 --task joint_tracking --algo sac \
+  --num-envs 16 --total-timesteps 2000000 --config /path/to/override.yaml
+
+# Disable streaming (offline training)
+python -m core_rl.train --robot parol6 --task joint_tracking --algo ppo --no-redis --no-mlflow
+```
+
+### Robot Config Resolution
+
+Each robot provides `rl_config.yaml` in its description package:
+```
+src/<robot>/<robot>_description/config/rl_config.yaml
+```
+Declares: `urdf_path`, `mesh_dir`, `gains_path`, `joint_names`, `uri_strip_patterns`.
+`robot.py` reads this, patches the URDF for MuJoCo (strips URIs, injects `fusestatic="false"`), writes a MuJoCo-loadable URDF into the mesh directory, and returns a `RobotConfig` dataclass.
+
+**Important:** Robot resolution is done **once in the parent process** and the `RobotConfig` is passed to `SubprocVecEnv` workers. This avoids race conditions where multiple subprocesses would write the same URDF file simultaneously.
+
+### Task System
+
+Tasks define observation/action spaces, reset logic, and reward functions:
+- `BaseTask` ABC with `configure()`, `reset()`, `compute_observation()`, `compute_reward()`
+- Registry: `@register_task("name")` decorator, looked up by string
+- **`joint_tracking`**: track random target positions; obs = `[q, dq, q_target]`; reward = `-||q - q_target||² - α||dq||²`
+
+### Algorithm System
+
+- `BaseAlgorithm` ABC with `train()`, `save()`, `load()`, `get_policy()`
+- Registry: `@register_algorithm("name")`
+- **`ppo`**, **`sac`**: thin wrappers around Stable-Baselines3
+
+### ONNX Export
+
+All computation layers baked into a single `DeployablePolicy(nn.Module)`:
+1. **ObservationNormalizer** — running mean/std from VecNormalize
+2. **Policy MLP** — extracted from SB3 (supports both PPO's `mlp_extractor` + `action_net` and SAC's `actor.latent_pi` + `actor.mu`)
+3. **GravityCompensationNet** — learned MLP `(q, dq) → qfrc_bias`
+4. **PDController** — `tau = kp*(q_d - q) + kd*(0 - dq) + grav_comp`
+
+GravComp data `(q, dq, qfrc_bias)` is collected during RL rollouts via `GravCompCollectorCallback` and the network is trained supervised post-hoc.
+
+### Streaming
+
+- **Redis Streams** (`rl:train:<experiment>:<run_id>:metrics`): step-level metrics, replay-able
+- **MLflow** (`http://mlflow:5000`): experiment tracking, hyperparams, metric curves, ONNX artifacts
+
+### File Map
+
+```
+src/common/rl/
+├── CMakeLists.txt, package.xml      — Uses ament_cmake_python for correct install paths
+├── config/defaults.yaml              — Default training hyperparameters
+└── core_rl/
+    ├── __init__.py, __main__.py      — Package init + `python -m core_rl` support
+    ├── robot.py                      — Robot config resolution (name → URDF + gains + joints)
+    ├── env.py                        — MujocoRobotEnv(gymnasium.Env) + make_env() factory
+    ├── train.py                      — CLI entry point
+    ├── export_onnx.py                — ONNX export with all layers
+    ├── algorithms/
+    │   ├── __init__.py               — BaseAlgorithm + registry
+    │   ├── ppo.py                    — PPO (SB3 wrapper)
+    │   └── sac.py                    — SAC (SB3 wrapper)
+    ├── tasks/
+    │   ├── __init__.py               — BaseTask + registry
+    │   └── joint_tracking.py         — Joint position tracking task
+    ├── modules/
+    │   ├── gravity_comp.py           — Learned gravity compensation MLP
+    │   ├── pd_controller.py          — PD controller as nn.Module
+    │   ├── normalizer.py             — Observation normalizer
+    │   └── deployable.py             — Full deployable pipeline
+    └── callbacks/
+        ├── redis_stream.py           — Redis Streams metric publishing
+        ├── mlflow_logger.py          — MLflow experiment tracking
+        └── grav_comp_collector.py    — Collects (q, dq, bias) data
+```
 
 ---
 
@@ -206,3 +314,6 @@ source install/setup.bash
 - **Scene objects off the control loop**: TF publishing for scene bodies uses a dedicated background thread with its own callback group and executor, locking `control_mu_` only briefly to read body poses. Zero impact on the 100 Hz control cycle.
 - **`fusestatic="false"`**: Required so MuJoCo preserves fixed-joint scene bodies as separate bodies (default behavior fuses them into the parent, making them inaccessible via `mj_name2id()`)
 - **Scene file resolution**: Bare filenames are resolved from `parol6_launch/config/`; absolute paths also accepted
+- **`ament_cmake_python`**: The RL package uses `ament_python_install_package()` so `core_rl` is installed to the correct `site-packages` directory on `PYTHONPATH` after sourcing the workspace
+- **Pre-resolved RobotConfig**: `resolve_robot()` runs once in the parent process; the `RobotConfig` object is passed to `SubprocVecEnv` workers to avoid file write race conditions
+- **SB3 policy extraction for ONNX**: `_ExtractedPolicyNet` detects whether the SB3 policy is on-policy (PPO: `mlp_extractor` + `action_net`) or off-policy (SAC: `actor.latent_pi` + `actor.mu`) and handles both

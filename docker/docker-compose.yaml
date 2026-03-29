@@ -44,6 +44,7 @@ services:
         - /tmp/.X11-unix:/tmp/.X11-unix
         - ../src:/ros2_ws/core/src
         - /dev/dri:/dev/dri
+        - ./data/models:/ros2_ws/core/models
     environment:
         - DISPLAY=${DISPLAY}
         - XDG_RUNTIME_DIR=/tmp/runtime-root

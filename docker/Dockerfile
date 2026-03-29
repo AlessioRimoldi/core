@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y \
 # Python virtual environment
 RUN python3 -m venv core
 ENV PATH="/core/bin:$PATH"
-RUN pip install mujoco empy lark numpy catkin_pkg stable-baselines3 gymnasium mlflow redis
+RUN pip install mujoco empy lark numpy catkin_pkg stable-baselines3 gymnasium mlflow redis onnx onnxruntime onnxscript torch
 
 # ros2_control framework
 RUN apt-get update && apt-get install -y \
