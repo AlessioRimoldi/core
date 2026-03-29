@@ -1,0 +1,11 @@
+<library path="parol6_hardware_interface">
+  <class
+    name="parol6_hardware_interface/Parol6HardwareInterface"
+    type="parol6_hardware_interface::Parol6HardwareInterface"
+    base_class_type="hardware_interface::SystemInterface">
+    <description>
+      ros2_control SystemInterface plugin for the PAROL6 desktop robotic arm.
+      Supports MuJoCo simulation and real serial hardware backends.
+    </description>
+  </class>
+</library>

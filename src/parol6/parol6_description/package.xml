@@ -3,11 +3,13 @@
 <package format="3">
   <name>parol6_description</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
+  <description>PAROL6 robot description, launch files, and configuration</description>
   <maintainer email="root@todo.todo">root</maintainer>
   <license>TODO: License declaration</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <exec_depend>parol6_hardware_interface</exec_depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>

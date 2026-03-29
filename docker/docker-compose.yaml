@@ -47,8 +47,10 @@ services:
         - DISPLAY=${DISPLAY}
         - XDG_RUNTIME_DIR=/tmp/runtime-root
         - SDL_AUDIODRIVER=dummy
+        - ROBOT_PKG=${ROBOT_PKG:-}
     ports:
       - '50051:50051'
+      - '8765:8765'
     restart: unless-stopped
     depends_on:
       - redis

@@ -1,0 +1,69 @@
+# PD gains for PAROL6 joints.
+# The hardware interface loads this file and uses the gains for the
+# MuJoCo PD control callback (sim) or feedforward shaping (real).
+# Controllers can override per-joint gains via the p_gain/d_gain
+# command interfaces; sending -1 means "use these defaults."
+
+sim:
+  L1:
+    kp: 200.0
+    kd: 10.0
+    kp_min: 0.0
+    kp_max: 500.0
+    kd_min: 0.0
+    kd_max: 50.0
+  L2:
+    kp: 300.0
+    kd: 15.0
+    kp_min: 0.0
+    kp_max: 600.0
+    kd_min: 0.0
+    kd_max: 50.0
+  L3:
+    kp: 250.0
+    kd: 12.0
+    kp_min: 0.0
+    kp_max: 500.0
+    kd_min: 0.0
+    kd_max: 50.0
+  L4:
+    kp: 100.0
+    kd: 5.0
+    kp_min: 0.0
+    kp_max: 300.0
+    kd_min: 0.0
+    kd_max: 30.0
+  L5:
+    kp: 100.0
+    kd: 5.0
+    kp_min: 0.0
+    kp_max: 300.0
+    kd_min: 0.0
+    kd_max: 30.0
+  L6:
+    kp: 50.0
+    kd: 2.0
+    kp_min: 0.0
+    kp_max: 200.0
+    kd_min: 0.0
+    kd_max: 20.0
+
+hardware:
+  L1:
+    kp: 0.0
+    kd: 0.0
+  L2:
+    kp: 0.0
+    kd: 0.0
+  L3:
+    kp: 0.0
+    kd: 0.0
+  L4:
+    kp: 0.0
+    kd: 0.0
+  L5:
+    kp: 0.0
+    kd: 0.0
+  L6:
+    kp: 0.0
+    kd: 0.0

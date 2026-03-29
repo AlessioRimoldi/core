@@ -1,63 +1,68 @@
+#pragma once
+
 #include "common/backend/backend.hpp"
 
+#include <set>
+#include <string>
 #include <vector>
 #include <unordered_map>
 
-#include "absl/synchronization/mutex.hpp"
+#include "absl/synchronization/mutex.h"
 #include "mujoco/mujoco.h"
 #include "rclcpp/rclcpp.hpp"
 #include "hardware_interface/system_interface.hpp"
 
 namespace common {
-    class MujocoBackend : public Backend {
-        public:
-            MujocoBackend();
-            ~MujocoBackend() override;
 
-            MujocoBackend(): logger_(rclcpp::get_logger("MujocoBackend")) {}
+class MujocoBackend : public Backend {
+public:
+    MujocoBackend() : logger_(rclcpp::get_logger("MujocoBackend")) {}
+    ~MujocoBackend() override;
 
-            hardware_interface::CallbackReturn init(const hardware_interface::HardwareInfo& info, rclcpp::Node::SharedPtr node) override;
-            hardware_interface::CallbackReturn activate() override;
-            hardware_interface::CallbackReturn deactivate() override;
+    hardware_interface::CallbackReturn init(
+        const hardware_interface::HardwareInfo& info,
+        rclcpp::Node::SharedPtr node) override;
+    hardware_interface::CallbackReturn activate() override;
+    hardware_interface::CallbackReturn deactivate() override;
 
-            void step(double control_period) override;
-            void set_controller_active(bool active) override;
+    void step(double control_period) override;
+    void set_controller_active(bool active) override;
 
-            bool read(std::array<MotorState, knumberOfMotors>& states, int& mode_machine) override;
-            void write(const std::array<MotorCommand, knumberOfMotors>& commands) override;
+    bool read(std::vector<MotorState>& states) override;
+    void write(const std::vector<MotorCommand>& commands) override;
 
-            // Mujoco control callback -- compute PD torques and writes to ctrl
-            void control(const mjModel* model, mjData* data);
+    // MuJoCo control callback -- compute PD torques and write to ctrl
+    void control(const mjModel* model, mjData* data);
 
-            // Accessors
-            mjModel* model() const { return mj_model_; }
-            mjData* data() const { return mj_data_; }
+    // Accessors
+    mjModel* model() const { return mj_model_; }
+    mjData* data() const { return mj_data_; }
 
-        private:
-            rclcpp::Logger logger_;
-            
-            mjModel* mj_model_{nullptr};
-            mjData* mj_data_{nullptr};
+private:
+    rclcpp::Logger logger_;
 
-            // Joint ordering
-            static const std::vector<std::string> kAllJoints;
+    mjModel* mj_model_{nullptr};
+    mjData* mj_data_{nullptr};
 
-            std::unordered_map<std::string, int> name_to_mj_q_index_;
-            std::unordered_map<std::string, int> name_to_mj_ctrl_index_;
+    // Joint names from hardware info (defines joint ordering)
+    std::vector<std::string> joint_names_;
 
-            absl::Mutex control_mu_;
-            std::unordered_map<std::string, double> pos_setpoint_;
-            std::unordered_map<std::string, double> vel_setpoint_;
-            std::unordered_map<std::string, double> tau_feedforward_;
-            std::unordered_map<std::string, double> kp_;
-            std::unordered_map<std::string, double> kd_;
+    std::unordered_map<std::string, int> name_to_mj_q_index_;
+    std::unordered_map<std::string, int> name_to_mj_dof_index_;
 
-            // Instability detection
-            int control_tick_{0};
-            bool unstable_{false};
+    absl::Mutex control_mu_;
+    std::unordered_map<std::string, double> pos_setpoint_;
+    std::unordered_map<std::string, double> vel_setpoint_;
+    std::unordered_map<std::string, double> tau_feedforward_;
+    std::unordered_map<std::string, double> kp_;
+    std::unordered_map<std::string, double> kd_;
 
-            // When false, control() holds pose vi agfrc bias instead of PD
-            bool controller_active_{false}; 
+    // Instability detection
+    int control_tick_{0};
+    bool unstable_{false};
 
-    };
-}
+    // When false, control() holds pose via qfrc_bias instead of PD
+    bool controller_active_{false};
+};
+
+}  // namespace common

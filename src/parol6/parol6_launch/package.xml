@@ -1,23 +1,21 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>parol6_hardware_interface</name>
+  <name>parol6_launch</name>
   <version>0.0.0</version>
-  <description>ros2_control hardware interface for the PAROL6 desktop robotic arm</description>
+  <description>PAROL6 launch files and controller configuration</description>
   <maintainer email="alessio.rimoldi.work@gmail.com">root</maintainer>
   <license>TODO: License declaration</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
-  <depend>hardware_interface</depend>
-  <depend>rclcpp</depend>
-  <depend>rclcpp_lifecycle</depend>
-  <depend>pluginlib</depend>
-  <depend>sensor_msgs</depend>
-  <depend>yaml-cpp</depend>
-
-  <build_depend>mujoco_vendor</build_depend>
-  <build_depend>libabsl-dev</build_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>controller_manager</exec_depend>
+  <exec_depend>joint_state_broadcaster</exec_depend>
+  <exec_depend>joint_trajectory_controller</exec_depend>
+  <exec_depend>parol6_hardware_interface</exec_depend>
+  <exec_depend>parol6_description</exec_depend>
+  <exec_depend>foxglove_bridge</exec_depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>

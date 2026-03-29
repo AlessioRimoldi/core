@@ -32,7 +32,7 @@ RUN mkdir -p /ros2_ws/core/thirdparty && \
     git clone https://github.com/pal-robotics/mujoco_vendor.git -b master && \
     cd /ros2_ws && \
     . /opt/ros/jazzy/setup.sh && \
-    colcon build --packages-up-to mujoco_ros2_control
+    colcon build --symlink-install --packages-up-to mujoco_ros2_control
 
 # Parol6 urdfs + meshes only sparse checkout (temporary solution)
 RUN mkdir -p /ros2_ws/core/thirdparty/parol6_upstream && \
@@ -48,6 +48,7 @@ RUN apt-get update && apt-get install -y \
     iputils-ping \
     redis-tools \
     libabsl-dev \
+    ros-jazzy-foxglove-bridge \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /ros2_ws/core/src

@@ -1,11 +1,11 @@
 cmake_minimum_required(VERSION 3.8)
-project(parol6_description)
+project(parol6_launch)
 
 find_package(ament_cmake REQUIRED)
 
-# Install config (gains)
+# Install launch files and controller config
 install(
-  DIRECTORY config
+  DIRECTORY launch config
   DESTINATION share/${PROJECT_NAME}
 )
 
