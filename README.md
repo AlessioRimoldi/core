@@ -50,11 +50,17 @@ Inside the container:
 # Simulation (MuJoCo) — default
 ros2 launch parol6_launch parol6.launch.py
 
+# Simulation with scene objects (table, cubes, etc.)
+ros2 launch parol6_launch parol6.launch.py scene_file:=scene.yaml
+
 # Real hardware
 ros2 launch parol6_launch parol6.launch.py hardware_interface_type:=real
 
 # Real hardware on a specific serial port
 ros2 launch parol6_launch parol6.launch.py hardware_interface_type:=real serial_port:=/dev/ttyUSB0
+
+# Disable RViz auto-launch
+ros2 launch parol6_launch parol6.launch.py rviz:=false
 ```
 
 The launch file starts:
@@ -62,6 +68,8 @@ The launch file starts:
 - `ros2_control_node` — controller manager with the hardware interface
 - `joint_state_broadcaster` — publishes `/joint_states` at 100 Hz
 - `joint_trajectory_controller` — accepts trajectory goals
+- `rviz2` — pre-configured 3D visualization (disable with `rviz:=false`)
+- `scene_marker_publisher` — publishes `/scene_markers` MarkerArray (when `scene_file` is set)
 
 Verify it's working:
 ```bash
@@ -99,7 +107,36 @@ src/
 └── parol6/
     ├── parol6_description/      # URDF/xacro, robot-specific config (PD gains)
     ├── parol6_hardware_interface/  # ros2_control SystemInterface plugin
-    └── parol6_launch/           # Launch files, controller config
+    └── parol6_launch/           # Launch files, controller config, scene objects
+        ├── config/scene.yaml    # Example scene definition
+        └── scripts/             # scene_marker_publisher, example_trajectory
+```
+
+## Scene Objects
+
+Define objects in a YAML file to inject them into the MuJoCo simulation and visualize them in RViz:
+
+```yaml
+objects:
+  - name: table
+    type: box                    # box | sphere | cylinder
+    size: [0.6, 0.4, 0.02]      # half-extents (box)
+    position: [0.3, 0.0, -0.01]
+    color: [0.6, 0.4, 0.2, 1.0] # rgba
+    dynamic: false               # fixed in place (default)
+
+  - name: red_cube
+    type: box
+    size: [0.025, 0.025, 0.025]
+    position: [0.25, 0.1, 0.035]
+    color: [0.9, 0.1, 0.1, 1.0]
+    dynamic: true                # affected by gravity & contacts
+    mass: 0.05                   # kg (optional)
+```
+
+Pass the filename (resolved from `parol6_launch/config/`) or an absolute path:
+```bash
+ros2 launch parol6_launch parol6.launch.py scene_file:=scene.yaml
 ```
 
 ## Adding a New Robot

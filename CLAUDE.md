@@ -35,6 +35,29 @@ common::Backend (abstract)
 
 The hardware interface instantiates the correct backend based on the `hardware_interface_type` ROS parameter (`"sim"` or `"real"`).
 
+### Scene Objects (`parol6_launch/config/scene.yaml`)
+
+Scene objects (tables, cubes, etc.) can be injected into the MuJoCo simulation and visualized in RViz via a YAML file. The pipeline is robot-agnostic and runs entirely off the control loop:
+
+1. **Launch file** reads the scene YAML, injects URDF `<link>` + `<joint>` elements into the MuJoCo-only URDF (not the RViz one). Fixed objects get `type="fixed"` joints; dynamic objects get `type="floating"` (6-DOF, affected by gravity/contacts).
+2. **MujocoBackend** reads `scene_file_path` from hardware parameters, resolves body IDs via `mj_name2id()`, and publishes TF for each scene body at 10 Hz on a **dedicated background thread** (separate callback group + `SingleThreadedExecutor`). Uses existing `control_mu_` mutex to briefly read `xpos`/`xquat`.
+3. **`scene_marker_publisher.py`** — standalone Python node that reads the YAML for shapes/colors, uses TF frames for positions, and publishes a `visualization_msgs/MarkerArray` on `/scene_markers` at 10 Hz.
+
+**Scene YAML format:**
+```yaml
+objects:
+  - name: table
+    type: box              # box | sphere | cylinder
+    size: [0.6, 0.4, 0.02] # half-extents (box only)
+    position: [0.3, 0.0, -0.01]
+    orientation: [0.0, 0.0, 0.0]  # rpy
+    color: [0.6, 0.4, 0.2, 1.0]  # rgba
+    dynamic: false          # true = free-floating, false = fixed (default)
+    mass: 0.05              # kg (optional, auto-computed inertia)
+```
+
+**Key constraint:** `<mujoco><compiler fusestatic="false"/></mujoco>` is injected into the URDF to prevent MuJoCo from merging fixed-joint bodies into their parent, which would make them invisible to `mj_name2id()`.
+
 ### Hardware Interface (`src/parol6/parol6_hardware_interface/`)
 
 A standard `ros2_control` **SystemInterface** plugin. Exports position/velocity/effort state interfaces and position/velocity/effort/p_gain/d_gain command interfaces per joint.
@@ -121,14 +144,19 @@ steps_per_radian[i] = (6400.0 × gear_ratio[i]) / (2π)
 ```
 src/
 ├── common/backend/
-│   ├── backend.hpp               — Abstract Backend base class
+│   ├── backend.hpp               — Abstract Backend base class + BodyPose struct
 │   ├── mujoco_backend.hpp        — MuJoCo simulation backend header
-│   └── mujoco_backend.cpp        — MuJoCo backend implementation
+│   └── mujoco_backend.cpp        — MuJoCo backend implementation + scene TF publisher
 └── parol6/
     ├── parol6_description/       — URDF/xacro, robot-specific config (PD gains)
     ├── parol6_launch/            — Launch files, controller configuration
     │   ├── launch/parol6.launch.py
-    │   └── config/controllers.yaml
+    │   ├── config/controllers.yaml
+    │   ├── config/scene.yaml     — Example scene objects definition
+    │   ├── config/parol6.rviz    — RViz2 config (RobotModel + SceneMarkers)
+    │   └── scripts/
+    │       ├── example_trajectory.py
+    │       └── scene_marker_publisher.py  — MarkerArray publisher for scene objects
     └── parol6_hardware_interface/
         ├── CMakeLists.txt
         ├── package.xml
@@ -175,3 +203,6 @@ source install/setup.bash
 - **Gain resolution with -1 sentinel**: controllers can override per-joint PD gains via command interfaces; -1 means "use YAML default"
 - **Deferred backend activation**: `perform_command_mode_switch` sets a pending flag; the backend is activated on the next `write()` cycle so the controller has one cycle to populate commands before the robot starts moving
 - **Synchronous serial I/O** for PAROL6: `write()` sends command + reads response; `read()` returns cached state from previous cycle
+- **Scene objects off the control loop**: TF publishing for scene bodies uses a dedicated background thread with its own callback group and executor, locking `control_mu_` only briefly to read body poses. Zero impact on the 100 Hz control cycle.
+- **`fusestatic="false"`**: Required so MuJoCo preserves fixed-joint scene bodies as separate bodies (default behavior fuses them into the parent, making them inaccessible via `mj_name2id()`)
+- **Scene file resolution**: Bare filenames are resolved from `parol6_launch/config/`; absolute paths also accepted
