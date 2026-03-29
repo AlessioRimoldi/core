@@ -15,6 +15,9 @@
   <exec_depend>joint_trajectory_controller</exec_depend>
   <exec_depend>parol6_hardware_interface</exec_depend>
   <exec_depend>parol6_description</exec_depend>
+  <exec_depend>visualization_msgs</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>

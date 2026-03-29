@@ -14,6 +14,8 @@
   <depend>rclcpp_lifecycle</depend>
   <depend>pluginlib</depend>
   <depend>sensor_msgs</depend>
+  <depend>tf2_ros</depend>
+  <depend>geometry_msgs</depend>
   <depend>yaml-cpp</depend>
 
   <build_depend>mujoco_vendor</build_depend>

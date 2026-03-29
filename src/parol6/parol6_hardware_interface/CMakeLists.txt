@@ -15,6 +15,8 @@ find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(geometry_msgs REQUIRED)
 find_package(yaml-cpp REQUIRED)
 
 # MuJoCo via the vendor package (built during docker image build)
@@ -57,6 +59,8 @@ ament_target_dependencies(${PROJECT_NAME}
   rclcpp_lifecycle
   pluginlib
   sensor_msgs
+  tf2_ros
+  geometry_msgs
 )
 
 # ── pluginlib export ──────────────────────────────────────────────────────────
@@ -90,6 +94,8 @@ ament_export_dependencies(
   rclcpp_lifecycle
   pluginlib
   sensor_msgs
+  tf2_ros
+  geometry_msgs
 )
 
 ament_package()

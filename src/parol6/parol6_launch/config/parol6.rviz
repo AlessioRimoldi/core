@@ -38,6 +38,16 @@ Visualization Manager:
       Name: TF
       Enabled: false
       Value: false
+    - Class: rviz_default_plugins/MarkerArray
+      Name: SceneMarkers
+      Enabled: true
+      Value: true
+      Topic:
+        Value: /scene_markers
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
   Global Options:
     Background Color: 48; 48; 48
     Fixed Frame: world

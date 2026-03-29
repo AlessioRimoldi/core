@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -24,6 +25,12 @@ struct MotorState {
     double dq = 0.0;
     double tau = 0.0;
     uint8_t status = 0;
+};
+
+struct BodyPose {
+    std::string name;
+    std::array<double, 3> pos{0, 0, 0};   // x, y, z
+    std::array<double, 4> quat{1, 0, 0, 0}; // w, x, y, z (MuJoCo convention)
 };
 
 class Backend {

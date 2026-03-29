@@ -4,6 +4,7 @@
 
 #include <set>
 #include <string>
+#include <thread>
 #include <vector>
 #include <unordered_map>
 
@@ -11,6 +12,7 @@
 #include "mujoco/mujoco.h"
 #include "rclcpp/rclcpp.hpp"
 #include "hardware_interface/system_interface.hpp"
+#include "tf2_ros/transform_broadcaster.h"
 
 namespace common {
 
@@ -63,6 +65,21 @@ private:
 
     // When false, control() holds pose via qfrc_bias instead of PD
     bool controller_active_{false};
+
+    // ── Scene body TF publishing (background thread, off the control loop) ──
+    rclcpp::Node::SharedPtr node_;
+    std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
+    rclcpp::TimerBase::SharedPtr scene_timer_;
+    rclcpp::CallbackGroup::SharedPtr scene_cb_group_;
+    rclcpp::executors::SingleThreadedExecutor::SharedPtr scene_executor_;
+    std::thread scene_thread_;
+
+    // Scene body name → MuJoCo body ID
+    std::vector<std::string> scene_body_names_;
+    std::vector<int> scene_body_ids_;
+
+    void setup_scene_tf_publisher();
+    void publish_scene_tf();
 };
 
 }  // namespace common

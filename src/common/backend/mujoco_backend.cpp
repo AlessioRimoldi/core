@@ -4,6 +4,9 @@
 #include <cmath>
 #include <string>
 
+#include "geometry_msgs/msg/transform_stamped.hpp"
+#include "yaml-cpp/yaml.h"
+
 namespace common {
 
     // Static active-backend pointer used by the mjcb_control callback.
@@ -18,13 +21,23 @@ namespace common {
     // Destructor
 
     MujocoBackend::~MujocoBackend(){
+        // Stop the scene TF background thread
+        if (scene_executor_) {
+            scene_executor_->cancel();
+        }
+        if (scene_thread_.joinable()) {
+            scene_thread_.join();
+        }
+
         active_backend = nullptr;
         mjcb_control = nullptr;
         if (mj_data_) mj_deleteData(mj_data_);
         if (mj_model_) mj_deleteModel(mj_model_);
     }
 
-    hardware_interface::CallbackReturn MujocoBackend::init(const hardware_interface::HardwareInfo& info, rclcpp::Node::SharedPtr) {
+    hardware_interface::CallbackReturn MujocoBackend::init(const hardware_interface::HardwareInfo& info, rclcpp::Node::SharedPtr node) {
+
+        node_ = node;
 
         // Populate joint names from hardware info
         for (const auto& joint : info.joints) {
@@ -90,6 +103,35 @@ namespace common {
             tau_feedforward_[name] = 0.0;
             kp_[name] = 0.0;
             kd_[name] = 0.0;
+        }
+
+        // ── Scene body tracking ──
+        auto it = info.hardware_parameters.find("scene_file_path");
+        if (it != info.hardware_parameters.end() && !it->second.empty()) {
+            const auto& scene_path = it->second;
+            RCLCPP_INFO(logger_, "Loading scene objects from %s", scene_path.c_str());
+            try {
+                YAML::Node scene = YAML::LoadFile(scene_path);
+                if (scene["objects"]) {
+                    for (const auto& obj : scene["objects"]) {
+                        std::string name = obj["name"].as<std::string>();
+                        int body_id = mj_name2id(mj_model_, mjOBJ_BODY, name.c_str());
+                        if (body_id < 0) {
+                            RCLCPP_WARN(logger_, "Scene body '%s' not found in MuJoCo model", name.c_str());
+                            continue;
+                        }
+                        scene_body_names_.push_back(name);
+                        scene_body_ids_.push_back(body_id);
+                        RCLCPP_INFO(logger_, "Tracking scene body '%s' (id=%d)", name.c_str(), body_id);
+                    }
+                }
+            } catch (const YAML::Exception& e) {
+                RCLCPP_ERROR(logger_, "Failed to parse scene file: %s", e.what());
+            }
+
+            if (!scene_body_names_.empty()) {
+                setup_scene_tf_publisher();
+            }
         }
 
         return hardware_interface::CallbackReturn::SUCCESS;
@@ -248,6 +290,57 @@ namespace common {
 
             data->qfrc_applied[dof_idx] = kp_val * (pos_d - pos) + kd_val * (vel_d - vel) + tau;
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Scene TF publishing (background thread, off the control loop)
+    // -------------------------------------------------------------------------
+
+    void MujocoBackend::setup_scene_tf_publisher() {
+        scene_cb_group_ = node_->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+        tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(node_);
+
+        scene_timer_ = node_->create_wall_timer(
+            std::chrono::milliseconds(100),  // 10 Hz
+            [this]() { publish_scene_tf(); },
+            scene_cb_group_);
+
+        scene_executor_ = std::make_shared<rclcpp::executors::SingleThreadedExecutor>();
+        scene_executor_->add_callback_group(scene_cb_group_, node_->get_node_base_interface());
+
+        scene_thread_ = std::thread([this]() {
+            RCLCPP_INFO(logger_, "Scene TF publisher thread started (%zu bodies)", scene_body_names_.size());
+            scene_executor_->spin();
+        });
+    }
+
+    void MujocoBackend::publish_scene_tf() {
+        std::vector<geometry_msgs::msg::TransformStamped> transforms;
+        transforms.reserve(scene_body_ids_.size());
+
+        auto stamp = node_->now();
+
+        {
+            absl::MutexLock lock(&control_mu_);
+            for (size_t i = 0; i < scene_body_ids_.size(); ++i) {
+                int id = scene_body_ids_[i];
+                geometry_msgs::msg::TransformStamped t;
+                t.header.stamp = stamp;
+                t.header.frame_id = "world";
+                t.child_frame_id = scene_body_names_[i];
+                t.transform.translation.x = mj_data_->xpos[id * 3 + 0];
+                t.transform.translation.y = mj_data_->xpos[id * 3 + 1];
+                t.transform.translation.z = mj_data_->xpos[id * 3 + 2];
+                // MuJoCo quaternion: (w, x, y, z)
+                t.transform.rotation.w = mj_data_->xquat[id * 4 + 0];
+                t.transform.rotation.x = mj_data_->xquat[id * 4 + 1];
+                t.transform.rotation.y = mj_data_->xquat[id * 4 + 2];
+                t.transform.rotation.z = mj_data_->xquat[id * 4 + 3];
+                transforms.push_back(t);
+            }
+        }
+
+        tf_broadcaster_->sendTransform(transforms);
     }
 
 }  // namespace common

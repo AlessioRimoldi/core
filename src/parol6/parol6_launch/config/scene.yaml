@@ -1,0 +1,40 @@
+# Scene objects injected into MuJoCo and visualized as RViz markers.
+# Each object becomes a URDF link+joint and a MuJoCo body.
+# Set dynamic: true for objects affected by gravity and contacts.
+
+objects:
+  - name: table
+    type: box
+    size: [0.6, 0.4, 0.02]       # half-extents for MuJoCo geom
+    position: [0.3, 0.0, -0.01]   # xyz in world frame
+    orientation: [0.0, 0.0, 0.0]  # rpy (radians)
+    color: [0.6, 0.4, 0.2, 1.0]  # rgba
+    dynamic: false
+
+  - name: red_cube
+    type: box
+    size: [0.025, 0.025, 0.025]
+    position: [0.25, 0.1, 0.035]
+    orientation: [0.0, 0.0, 0.0]
+    color: [0.9, 0.1, 0.1, 1.0]
+    dynamic: true
+    mass: 0.05                     # kg
+
+  - name: green_cylinder
+    type: cylinder
+    radius: 0.02
+    length: 0.06
+    position: [0.35, -0.1, 0.04]
+    orientation: [0.0, 0.0, 0.0]
+    color: [0.1, 0.8, 0.1, 1.0]
+    dynamic: true
+    mass: 0.05
+
+  - name: blue_sphere
+    type: sphere
+    radius: 0.03
+    position: [0.3, 0.15, 0.05]
+    orientation: [0.0, 0.0, 0.0]
+    color: [0.1, 0.2, 0.9, 1.0]
+    dynamic: true
+    mass: 0.05
