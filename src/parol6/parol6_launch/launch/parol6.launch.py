@@ -96,8 +96,8 @@ def _make_mjcf_from_urdf(urdf_path: str, mesh_dir: str) -> str:
 def _strip_legacy_blocks(urdf_text: str) -> str:
     """Remove ROS1-era <transmission>, <gazebo>, and Gazebo plugin blocks.
 
-    These are vestigial from the SolidWorks URDF exporter and can confuse
-    Foxglove's URDF parser (and are unused in ros2_control).
+    These are vestigial from the SolidWorks URDF exporter and are unused
+    in ros2_control.
     """
     import re
     urdf_text = re.sub(r'<transmission[\s\S]*?</transmission\s*>', '', urdf_text)
@@ -189,20 +189,16 @@ def _launch_setup(context):
         delay_jtc,
     ]
 
-    foxglove = LaunchConfiguration("foxglove").perform(context)
-    if foxglove == "true":
-        foxglove_bridge = Node(
-            package="foxglove_bridge",
-            executable="foxglove_bridge",
-            parameters=[{
-                "port": 8765,
-                "address": "0.0.0.0",
-                "capabilities": ["clientPublish", "connectionGraph", "assets"],
-                "asset_uri_allowlist": ["^package://.*"],
-            }],
+    rviz = LaunchConfiguration("rviz").perform(context)
+    if rviz == "true":
+        rviz_config = os.path.join(launch_share, "config", "parol6.rviz")
+        rviz_node = Node(
+            package="rviz2",
+            executable="rviz2",
+            arguments=["-d", rviz_config],
             output="screen",
         )
-        nodes.append(foxglove_bridge)
+        nodes.append(rviz_node)
 
     return nodes
 
@@ -223,9 +219,9 @@ def generate_launch_description():
             description="Serial device path (only used when hardware_interface_type:=real)",
         ),
         DeclareLaunchArgument(
-            "foxglove",
+            "rviz",
             default_value="true",
-            description="Launch Foxglove Bridge for visualization",
+            description="Launch RViz2 with pre-configured robot view",
             choices=["true", "false"],
         ),
         OpaqueFunction(function=_launch_setup),

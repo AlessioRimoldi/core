@@ -43,11 +43,14 @@ services:
     volumes: 
         - /tmp/.X11-unix:/tmp/.X11-unix
         - ../src:/ros2_ws/core/src
+        - /dev/dri:/dev/dri
     environment:
         - DISPLAY=${DISPLAY}
         - XDG_RUNTIME_DIR=/tmp/runtime-root
         - SDL_AUDIODRIVER=dummy
         - ROBOT_PKG=${ROBOT_PKG:-}
+        - NVIDIA_VISIBLE_DEVICES=all
+        - NVIDIA_DRIVER_CAPABILITIES=all
     ports:
       - '50051:50051'
       - '8765:8765'
@@ -63,5 +66,5 @@ services:
           devices:
             - driver: nvidia
               count: 1
-              capabilities:  [gpu]
+              capabilities:  [gpu, graphics, display]
 
