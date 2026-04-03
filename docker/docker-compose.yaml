@@ -1,5 +1,5 @@
 #================================================================
-# CORE Training & Simulation Environment 
+# CORE Training & Simulation Environment - GPU-Accelerated 
 #================================================================
 # Usage:
 #
@@ -17,7 +17,7 @@ services:
       volumes:
         - ./data/redis-data:/data
       environment:
-        - REDIS_ARGS=--requirepass $REDIS_PASS --appendonly yes --loglevel warningS
+        - REDIS_ARGS=--requirepass $REDIS_PASS --appendonly yes --loglevel warning
       restart: unless-stopped
       networks:
         - core
@@ -50,8 +50,6 @@ services:
         - XDG_RUNTIME_DIR=/tmp/runtime-root
         - SDL_AUDIODRIVER=dummy
         - ROBOT_PKG=${ROBOT_PKG:-}
-        - NVIDIA_VISIBLE_DEVICES=all
-        - NVIDIA_DRIVER_CAPABILITIES=all
     ports:
       - '50051:50051'
       - '8765:8765'
@@ -61,6 +59,15 @@ services:
       - mlflow
     networks:
       - core
+  
+  env-gpu:
+    extends:
+      service: env
+    container_name: env
+    profiles: ["gpu"]
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
     deploy:
       resources:
         reservations:
