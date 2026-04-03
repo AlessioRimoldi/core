@@ -5,18 +5,50 @@ Infrastructure for training, evaluating, and deploying robot policies using **RO
 ## Prerequisites
 
 - Docker & Docker Compose
-- NVIDIA GPU + [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)
 - X11 (for MuJoCo rendering)
+- *(Optional)* NVIDIA GPU + [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) for GPU acceleration
+
+Make sure your user is in the `docker` group so you can run Docker without `sudo`:
+
+```bash
+sudo usermod -aG docker $USER
+```
+
+> **Note:** Log out and back in for the group change to take effect.
 
 ## Quick Start
 
+After cloning the repo, run the setup script to create a virtual environment, install dependencies, and configure pre-commit hooks:
+
 ```bash
+ bash scripts/setup.sh
+```
+
+This will:
+1. Create a `.venv/` Python virtual environment
+2. Install project dependencies from `pyproject.toml`
+3. Install and activate [pre-commit](https://pre-commit.com/) hooks
+
+Pre-commit runs automatically on every `git commit`. To run all checks manually:
+
+```bash
+source .venv/bin/activate
+pre-commit run --all-files
+```
+After this run:
+
+```bash
+# Make scripts executable
+chmod +x docker.sh scripts/setup.sh
+
 # Allow Docker to use the X11 display
 xhost +local:docker
 
-# Build and start all services (Redis, MLFlow, env)
-cd docker
-docker compose up --build -d
+# Start all services (Redis, MLflow, env)
+./docker.sh start
+
+# Start with GPU acceleration
+./docker.sh start -g
 ```
 
 This starts three services:
@@ -27,11 +59,21 @@ This starts three services:
 | `mlflow` | Experiment tracking UI | 5000 |
 | `env` | ROS2 + MuJoCo runtime | — |
 
-On startup, the `env` container automatically builds all ROS2 packages in `src/`. To build only a specific package (and its dependencies):
+On first startup, the `env` container automatically builds **all** ROS2 packages in `src/`. To speed up the initial build, you can limit it to a specific package (and its dependencies) by setting `ROBOT_PKG`:
 
 ```bash
-ROBOT_PKG=parol6_launch docker compose up -d
+ROBOT_PKG=parol6_launch ./docker.sh start
 ```
+
+For subsequent rebuilds after code changes, use `./docker.sh build` instead (see [Rebuilding After Code Changes](#rebuilding-after-code-changes)).
+
+To stop the network and remove the containers run
+
+```bash
+# Stop all services
+./docker.sh stop
+```
+
 
 ## Connecting to the Container
 
@@ -42,25 +84,25 @@ ROBOT_PKG=parol6_launch docker compose up -d
 docker exec -it env bash
 ```
 
-## Launching the PAROL6 Robot
+## Launching the a Robot
 
 Inside the container:
 
 ```bash
 # Simulation (MuJoCo) — default
-ros2 launch parol6_launch parol6.launch.py
+ros2 launch [robot-name]_launch parol6.launch.py
 
 # Simulation with scene objects (table, cubes, etc.)
-ros2 launch parol6_launch parol6.launch.py scene_file:=scene.yaml
+ros2 launch [robot-name]_launch parol6.launch.py scene_file:=scene.yaml
 
 # Real hardware
-ros2 launch parol6_launch parol6.launch.py hardware_interface_type:=real
+ros2 launch [robot-name]_launch [robot-name].launch.py hardware_interface_type:=real
 
-# Real hardware on a specific serial port
-ros2 launch parol6_launch parol6.launch.py hardware_interface_type:=real serial_port:=/dev/ttyUSB0
+# Real hardware on a specific serial port (if allowed, e.g. parol6)
+ros2 launch  [robot-name].launch.py hardware_interface_type:=real serial_port:=/dev/ttyUSB0
 
 # Disable RViz auto-launch
-ros2 launch parol6_launch parol6.launch.py rviz:=false
+ros2 launch [robot-name]_launch [robot-name].launch.py rviz:=false
 ```
 
 The launch file starts:
@@ -80,8 +122,12 @@ ros2 topic echo /joint_states
 
 C++ changes (hardware interface, backends) require a rebuild:
 ```bash
-cd /ros2_ws && colcon build --symlink-install
-source install/setup.bash
+# Build all packages
+./docker.sh build
+
+# Build specific packages (and their dependencies)
+./docker.sh build parol6_launch
+./docker.sh build parol6_launch core_rl
 ```
 
 Python changes (launch files, configs) take effect immediately thanks to `--symlink-install`.
@@ -125,18 +171,18 @@ Monitor training at [http://localhost:5000](http://localhost:5000) (MLflow UI).
 
 Create a Python file in `src/common/rl/core_rl/tasks/` with a `@register_task("name")` decorated class extending `BaseTask`. See `joint_tracking.py` as a reference.
 
-## Stack Management
+### Code Quality Hooks
 
-```bash
-# Stop all services
-cd docker && docker compose down
-
-# Rebuild the Docker image (after Dockerfile changes)
-docker compose build
-
-# View container logs
-docker compose logs -f env
-```
+| Hook | Language | Purpose |
+|------|----------|---------------------------------------------|
+| `trailing-whitespace` | All | Remove trailing whitespace |
+| `end-of-file-fixer` | All | Ensure files end with a newline |
+| `black` | Python | Auto-format Python code (line length 120) |
+| `ruff` | Python | Linting, import sorting, style enforcement |
+| `clang-format` | C++ | Auto-format C/C++ (Google style, 120 cols) |
+| `cpplint` | C++ | Google-style C++ linting |
+| `cmake-format` | CMake | Auto-format CMakeLists.txt |
+| `shellcheck` | Shell | Lint shell scripts |
 
 ## Project Structure
 

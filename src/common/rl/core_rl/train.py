@@ -8,10 +8,8 @@ from __future__ import annotations
 
 import argparse
 import os
-import sys
 import time
 
-import numpy as np
 import yaml
 from stable_baselines3.common.vec_env import SubprocVecEnv, VecMonitor, VecNormalize
 
@@ -39,20 +37,17 @@ def _load_config(config_path: str | None = None) -> dict:
     # Try ament share directory first (installed via colcon)
     try:
         from ament_index_python.packages import get_package_share_directory
-        defaults_path = os.path.join(
-            get_package_share_directory("core_rl"), "config", "defaults.yaml"
-        )
+
+        defaults_path = os.path.join(get_package_share_directory("core_rl"), "config", "defaults.yaml")
     except Exception:
         # Fallback: relative to source tree
-        defaults_path = os.path.join(
-            os.path.dirname(__file__), "..", "config", "defaults.yaml"
-        )
+        defaults_path = os.path.join(os.path.dirname(__file__), "..", "config", "defaults.yaml")
 
-    with open(defaults_path, "r") as f:
+    with open(defaults_path) as f:
         config = yaml.safe_load(f)
 
     if config_path:
-        with open(config_path, "r") as f:
+        with open(config_path) as f:
             override = yaml.safe_load(f)
         config = _deep_merge(config, override)
 
@@ -92,7 +87,7 @@ def main():
     output_dir = args.output_dir or os.path.join("/ros2_ws/core/models", run_id)
     os.makedirs(output_dir, exist_ok=True)
 
-    print(f"=== RL Training Pipeline ===")
+    print("=== RL Training Pipeline ===")
     print(f"  Robot:      {args.robot}")
     print(f"  Task:       {args.task}")
     print(f"  Algorithm:  {args.algo}")
@@ -137,15 +132,17 @@ def main():
 
     if not args.no_redis and cb_cfg["redis"]["enabled"]:
         redis_cfg = cb_cfg["redis"]
-        callbacks.append(RedisStreamCallback(
-            host=redis_cfg["host"],
-            port=redis_cfg["port"],
-            password=redis_cfg.get("password", ""),
-            experiment=args.experiment,
-            run_id=run_id,
-            publish_freq=redis_cfg["publish_freq"],
-            verbose=1,
-        ))
+        callbacks.append(
+            RedisStreamCallback(
+                host=redis_cfg["host"],
+                port=redis_cfg["port"],
+                password=redis_cfg.get("password", ""),
+                experiment=args.experiment,
+                run_id=run_id,
+                publish_freq=redis_cfg["publish_freq"],
+                verbose=1,
+            )
+        )
         print("  Redis streaming: enabled")
 
     mlflow_cb = None

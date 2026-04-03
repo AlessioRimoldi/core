@@ -135,7 +135,7 @@ class JointTrackingTask(BaseTask):
         pos_error = np.linalg.norm(q - self._q_target)
         vel_norm = np.linalg.norm(dq)
 
-        reward = -(pos_error ** 2) - self.velocity_penalty * (vel_norm ** 2)
+        reward = -(pos_error**2) - self.velocity_penalty * (vel_norm**2)
         reward *= self.reward_scale
 
         success = pos_error < self.success_threshold

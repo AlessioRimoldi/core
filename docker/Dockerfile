@@ -28,7 +28,7 @@ RUN apt-get update && apt-get install -y \
 # ros2_control mujoco binding, caveat: main tracks the latest ROS release, it will break in th future.
 RUN mkdir -p /ros2_ws/core/thirdparty && \
     cd /ros2_ws/core/thirdparty && \
-    git clone https://github.com/ros-controls/mujoco_ros2_control.git -b main && \  
+    git clone https://github.com/ros-controls/mujoco_ros2_control.git -b main && \
     git clone https://github.com/pal-robotics/mujoco_vendor.git -b master && \
     cd /ros2_ws && \
     . /opt/ros/jazzy/setup.sh && \

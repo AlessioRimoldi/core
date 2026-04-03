@@ -1,5 +1,5 @@
 #================================================================
-# CORE Training & Simulation Environment - GPU-Accelerated 
+# CORE Training & Simulation Environment - GPU-Accelerated
 #================================================================
 # Usage:
 #
@@ -9,7 +9,7 @@ networks:
     driver: bridge
 
 services:
-  redis: 
+  redis:
       image: redis:8.6.1
       container_name: redis
       ports:
@@ -26,21 +26,21 @@ services:
       image: ghcr.io/mlflow/mlflow:v2.16.0
       container_name: mlflow
       command: mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri sqlite:////mlruns/mlflow.db --default-artifact-root /mlruns
-      volumes: 
+      volumes:
         - ./data/mlruns:/mlruns
-      ports: 
+      ports:
         - '5000:5000'
       restart: unless-stopped
       networks:
         - core
-  
+
   env:
     container_name: env
     build:
       dockerfile: ./Dockerfile
     stdin_open: true
     tty: true
-    volumes: 
+    volumes:
         - /tmp/.X11-unix:/tmp/.X11-unix
         - ../src:/ros2_ws/core/src
         - /dev/dri:/dev/dri
@@ -59,7 +59,7 @@ services:
       - mlflow
     networks:
       - core
-  
+
   env-gpu:
     extends:
       service: env
@@ -75,4 +75,3 @@ services:
             - driver: nvidia
               count: 1
               capabilities:  [gpu, graphics, display]
-

@@ -26,7 +26,7 @@ done
 
 if [ -n "$ROBOT_PKG" ]; then
     echo "==> Building packages up to: $ROBOT_PKG"
-    colcon build --symlink-install --packages-up-to $ROBOT_PKG || {
+    colcon build --symlink-install --packages-up-to "$ROBOT_PKG" || {
         echo "==> WARNING: Build failed. Starting shell anyway for debugging."
     }
 else

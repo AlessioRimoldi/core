@@ -6,9 +6,9 @@ Usage:
   ros2 launch parol6_launch parol6.launch.py hardware_interface_type:=real
   ros2 launch parol6_launch parol6.launch.py scene_file:=/path/to/scene.yaml
 """
-import math
 import os
 
+import yaml
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
@@ -19,8 +19,6 @@ from launch.actions import (
 from launch.event_handlers import OnProcessExit
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
-import yaml
-
 
 # ── URDF generation ──────────────────────────────────────────────────────────
 # The upstream PAROL6 URDF (from PCrnjak) has no ros2_control tags and uses
@@ -86,7 +84,7 @@ def _make_mjcf_from_urdf(urdf_path: str, mesh_dir: str, scene_file_path: str = "
     ``package://`` URIs with bare filenames and write the patched URDF into
     the mesh directory so MuJoCo finds the STL files alongside it.
     """
-    with open(urdf_path, "r") as f:
+    with open(urdf_path) as f:
         urdf_text = f.read()
 
     # Strip to bare filenames — MuJoCo resolves relative to the model file
@@ -123,7 +121,7 @@ def _inject_scene_objects(urdf_text: str, scene_file_path: str) -> str:
     Objects with ``dynamic: true`` get a floating joint (6-DOF, affected
     by gravity and contacts); others get a fixed joint (welded to world).
     """
-    with open(scene_file_path, "r") as f:
+    with open(scene_file_path) as f:
         scene = yaml.safe_load(f)
 
     if not scene or "objects" not in scene:
@@ -154,8 +152,8 @@ def _inject_scene_objects(urdf_text: str, scene_file_path: str) -> str:
             geom = f'<geometry><sphere radius="{r}"/></geometry>'
         elif obj_type == "cylinder":
             r = obj["radius"]
-            l = obj["length"]
-            geom = f'<geometry><cylinder radius="{r}" length="{l}"/></geometry>'
+            length = obj["length"]
+            geom = f'<geometry><cylinder radius="{r}" length="{length}"/></geometry>'
         else:
             continue
 
@@ -164,7 +162,7 @@ def _inject_scene_objects(urdf_text: str, scene_file_path: str) -> str:
 
         # Compute inertia from shape (uniform density approximation)
         if obj_type == "box":
-            sx, sy, sz = [s * 2 for s in obj["size"]]  # full extents
+            sx, sy, sz = (s * 2 for s in obj["size"])  # full extents
             ixx = mass / 12.0 * (sy**2 + sz**2)
             iyy = mass / 12.0 * (sx**2 + sz**2)
             izz = mass / 12.0 * (sx**2 + sy**2)
@@ -215,7 +213,7 @@ def _build_robot_description(urdf_path: str, hw_type: str, gains_file: str,
                               mjcf_path: str, serial_port: str,
                               scene_file_path: str = "") -> str:
     """Read upstream URDF, strip closing </robot>, append ros2_control block."""
-    with open(urdf_path, "r") as f:
+    with open(urdf_path) as f:
         urdf_text = f.read()
 
     # Strip legacy ROS1/Gazebo blocks that confuse some URDF parsers
@@ -317,7 +315,6 @@ def _launch_setup(context):
 
     # Launch scene marker publisher when a scene file is provided
     if scene_file:
-        marker_script = os.path.join(launch_share, "scripts", "scene_marker_publisher.py")
         marker_node = Node(
             package="parol6_launch",
             executable="scene_marker_publisher",

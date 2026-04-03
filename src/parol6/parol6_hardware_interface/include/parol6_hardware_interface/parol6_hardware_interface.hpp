@@ -1,28 +1,26 @@
 #pragma once
 
 #include <memory>
+#include <rclcpp/logging.hpp>
+#include <rclcpp/macros.hpp>
+#include <rclcpp/node.hpp>
+#include <rclcpp_lifecycle/state.hpp>
+#include <sensor_msgs/msg/joint_state.hpp>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
+#include "common/backend/backend.hpp"
 #include "hardware_interface/handle.hpp"
 #include "hardware_interface/hardware_info.hpp"
 #include "hardware_interface/system_interface.hpp"
 #include "hardware_interface/types/hardware_interface_return_values.hpp"
 #include "hardware_interface/types/hardware_interface_type_values.hpp"
 
-#include <rclcpp/logging.hpp>
-#include <rclcpp/macros.hpp>
-#include <rclcpp/node.hpp>
-#include <rclcpp_lifecycle/state.hpp>
-#include <sensor_msgs/msg/joint_state.hpp>
-
-#include "common/backend/backend.hpp"
-
 namespace parol6_hardware_interface {
 
 class Parol6HardwareInterface : public hardware_interface::SystemInterface {
-public:
+ public:
     RCLCPP_SHARED_PTR_DEFINITIONS(Parol6HardwareInterface)
 
     Parol6HardwareInterface() : logger_(rclcpp::get_logger("parol6_hardware_interface")) {}
@@ -36,15 +34,14 @@ public:
     hardware_interface::return_type write(const rclcpp::Time& time, const rclcpp::Duration& period) override;
 
     hardware_interface::return_type perform_command_mode_switch(
-        const std::vector<std::string>& start_interfaces,
-        const std::vector<std::string>& stop_interfaces) override;
+        const std::vector<std::string>& start_interfaces, const std::vector<std::string>& stop_interfaces) override;
 
     std::vector<hardware_interface::StateInterface> export_state_interfaces() override;
     std::vector<hardware_interface::CommandInterface> export_command_interfaces() override;
 
     ~Parol6HardwareInterface() {}
 
-private:
+ private:
     rclcpp::Logger logger_;
     rclcpp::Node::SharedPtr node_;
 
@@ -89,8 +86,8 @@ private:
     rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr debug_publisher_;
 
     // Populate a MotorCommand with clamped pos/vel/eff and resolved gains
-    void populate_motor_command(common::MotorCommand& cmd, const std::string& joint_name,
-                                size_t i, float default_kp, float default_kd);
+    void populate_motor_command(common::MotorCommand& cmd, const std::string& joint_name, size_t i, float default_kp,
+                                float default_kd);
 
     // Initial positions captured at activation
     std::vector<double> initial_positions_;

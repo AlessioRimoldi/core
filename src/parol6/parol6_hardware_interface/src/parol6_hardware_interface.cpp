@@ -1,18 +1,17 @@
 #include "parol6_hardware_interface/parol6_hardware_interface.hpp"
 
+#include <yaml-cpp/yaml.h>
+
 #include <algorithm>
 #include <cmath>
 #include <memory>
 #include <string>
 #include <vector>
 
-#include <yaml-cpp/yaml.h>
-
-#include "hardware_interface/types/hardware_interface_type_values.hpp"
-#include "rclcpp/rclcpp.hpp"
-
 #include "common/backend/mujoco_backend.hpp"
+#include "hardware_interface/types/hardware_interface_type_values.hpp"
 #include "parol6_hardware_interface/parol6_backend.hpp"
+#include "rclcpp/rclcpp.hpp"
 
 namespace parol6_hardware_interface {
 
@@ -26,8 +25,8 @@ std::vector<hardware_interface::StateInterface> Parol6HardwareInterface::export_
     for (size_t i = 0; i < joint_names_.size(); i++) {
         state_interfaces.emplace_back(
             hardware_interface::StateInterface(joint_names_[i], hardware_interface::HW_IF_POSITION, &hw_positions_[i]));
-        state_interfaces.emplace_back(
-            hardware_interface::StateInterface(joint_names_[i], hardware_interface::HW_IF_VELOCITY, &hw_velocities_[i]));
+        state_interfaces.emplace_back(hardware_interface::StateInterface(
+            joint_names_[i], hardware_interface::HW_IF_VELOCITY, &hw_velocities_[i]));
         state_interfaces.emplace_back(
             hardware_interface::StateInterface(joint_names_[i], hardware_interface::HW_IF_EFFORT, &hw_efforts_[i]));
     }
@@ -81,8 +80,7 @@ hardware_interface::CallbackReturn Parol6HardwareInterface::on_init(
         backend_ = std::make_unique<common::MujocoBackend>();
         is_sim_ = true;
     } else {
-        RCLCPP_ERROR(logger_, "Unsupported hardware_interface_type: '%s'",
-                     hardware_interface_type_str.c_str());
+        RCLCPP_ERROR(logger_, "Unsupported hardware_interface_type: '%s'", hardware_interface_type_str.c_str());
         return hardware_interface::CallbackReturn::ERROR;
     }
 
@@ -152,8 +150,8 @@ hardware_interface::CallbackReturn Parol6HardwareInterface::on_init(
             }
         }
         if (joint_pos_min_.count(joint.name)) {
-            RCLCPP_DEBUG(logger_, "Joint %s limits: pos=[%.3f, %.3f]",
-                         joint.name.c_str(), joint_pos_min_[joint.name], joint_pos_max_[joint.name]);
+            RCLCPP_DEBUG(logger_, "Joint %s limits: pos=[%.3f, %.3f]", joint.name.c_str(), joint_pos_min_[joint.name],
+                         joint_pos_max_[joint.name]);
         }
     }
     RCLCPP_INFO(logger_, "Loaded URDF command limits for %zu joints", joint_pos_min_.size());
@@ -189,8 +187,7 @@ hardware_interface::CallbackReturn Parol6HardwareInterface::on_activate(const rc
         hw_commands_positions_[i] = initial_positions_[i];
         hw_commands_velocities_[i] = 0.0;
         hw_commands_efforts_[i] = 0.0;
-        RCLCPP_DEBUG(logger_, "Joint %s (index %zu) - q_init: %.3f",
-                     joint_names_[i].c_str(), i, initial_positions_[i]);
+        RCLCPP_DEBUG(logger_, "Joint %s (index %zu) - q_init: %.3f", joint_names_[i].c_str(), i, initial_positions_[i]);
     }
 
     // Perform an initial write so the backend has valid gains and setpoints
@@ -215,8 +212,7 @@ hardware_interface::CallbackReturn Parol6HardwareInterface::on_error(const rclcp
 hardware_interface::return_type Parol6HardwareInterface::read(const rclcpp::Time&, const rclcpp::Duration&) {
     std::vector<common::MotorState> states;
     if (!backend_->read(states)) {
-        RCLCPP_WARN_THROTTLE(logger_, *node_->get_clock(), 5000,
-                             "Waiting for first state from robot...");
+        RCLCPP_WARN_THROTTLE(logger_, *node_->get_clock(), 5000, "Waiting for first state from robot...");
         return hardware_interface::return_type::OK;
     }
 
@@ -236,9 +232,8 @@ hardware_interface::return_type Parol6HardwareInterface::read(const rclcpp::Time
 // Write helpers
 // ---------------------------------------------------------------------------
 
-void Parol6HardwareInterface::populate_motor_command(
-    common::MotorCommand& cmd, const std::string& joint_name,
-    size_t i, float default_kp, float default_kd) {
+void Parol6HardwareInterface::populate_motor_command(common::MotorCommand& cmd, const std::string& joint_name, size_t i,
+                                                     float default_kp, float default_kd) {
     cmd.enabled = true;
     cmd.q = hw_commands_positions_[i];
     cmd.dq = hw_commands_velocities_[i];
@@ -282,8 +277,7 @@ hardware_interface::return_type Parol6HardwareInterface::write(const rclcpp::Tim
         if (std::isnan(hw_commands_positions_[i]) || std::isnan(hw_commands_velocities_[i]) ||
             std::isnan(hw_commands_efforts_[i]) || std::isnan(hw_commands_p_gains_[i]) ||
             std::isnan(hw_commands_d_gains_[i])) {
-            RCLCPP_FATAL(logger_, "NaN detected in command for joint %s — shutting down!",
-                         joint_names_[i].c_str());
+            RCLCPP_FATAL(logger_, "NaN detected in command for joint %s — shutting down!", joint_names_[i].c_str());
             return hardware_interface::return_type::ERROR;
         }
     }
@@ -328,8 +322,7 @@ hardware_interface::return_type Parol6HardwareInterface::write(const rclcpp::Tim
 // ---------------------------------------------------------------------------
 
 hardware_interface::return_type Parol6HardwareInterface::perform_command_mode_switch(
-    const std::vector<std::string>& start_interfaces,
-    const std::vector<std::string>& /*stop_interfaces*/) {
+    const std::vector<std::string>& start_interfaces, const std::vector<std::string>& /*stop_interfaces*/) {
     if (!start_interfaces.empty()) {
         RCLCPP_INFO(logger_, "Controller claiming interfaces — will activate backend next cycle");
         controller_pending_ = true;

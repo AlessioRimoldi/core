@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import time
-from typing import Any
 
 import numpy as np
 import redis
@@ -54,12 +53,15 @@ class RedisStreamCallback(BaseCallback):
 
         # Publish run metadata
         meta_key = f"rl:train:{self.experiment}:{self.run_id}:meta"
-        self._client.hset(meta_key, mapping={
-            "experiment": self.experiment,
-            "run_id": self.run_id,
-            "start_time": str(time.time()),
-            "num_envs": str(self.training_env.num_envs),
-        })
+        self._client.hset(
+            meta_key,
+            mapping={
+                "experiment": self.experiment,
+                "run_id": self.run_id,
+                "start_time": str(time.time()),
+                "num_envs": str(self.training_env.num_envs),
+            },
+        )
 
         if self.verbose:
             print(f"Redis callback initialized — stream: {self._stream_key}")

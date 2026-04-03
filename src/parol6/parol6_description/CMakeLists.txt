@@ -4,10 +4,7 @@ project(parol6_description)
 find_package(ament_cmake REQUIRED)
 
 # Install config (gains)
-install(
-  DIRECTORY config
-  DESTINATION share/${PROJECT_NAME}
-)
+install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)

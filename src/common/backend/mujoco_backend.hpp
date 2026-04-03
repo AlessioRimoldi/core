@@ -1,29 +1,28 @@
 #pragma once
 
-#include "common/backend/backend.hpp"
-
+#include <memory>
 #include <set>
 #include <string>
 #include <thread>
-#include <vector>
 #include <unordered_map>
+#include <vector>
 
 #include "absl/synchronization/mutex.h"
+#include "common/backend/backend.hpp"
+#include "hardware_interface/system_interface.hpp"
 #include "mujoco/mujoco.h"
 #include "rclcpp/rclcpp.hpp"
-#include "hardware_interface/system_interface.hpp"
 #include "tf2_ros/transform_broadcaster.h"
 
 namespace common {
 
 class MujocoBackend : public Backend {
-public:
+ public:
     MujocoBackend() : logger_(rclcpp::get_logger("MujocoBackend")) {}
     ~MujocoBackend() override;
 
-    hardware_interface::CallbackReturn init(
-        const hardware_interface::HardwareInfo& info,
-        rclcpp::Node::SharedPtr node) override;
+    hardware_interface::CallbackReturn init(const hardware_interface::HardwareInfo& info,
+                                            rclcpp::Node::SharedPtr node) override;
     hardware_interface::CallbackReturn activate() override;
     hardware_interface::CallbackReturn deactivate() override;
 
@@ -40,7 +39,7 @@ public:
     mjModel* model() const { return mj_model_; }
     mjData* data() const { return mj_data_; }
 
-private:
+ private:
     rclcpp::Logger logger_;
 
     mjModel* mj_model_{nullptr};

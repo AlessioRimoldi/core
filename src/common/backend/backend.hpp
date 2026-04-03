@@ -29,17 +29,16 @@ struct MotorState {
 
 struct BodyPose {
     std::string name;
-    std::array<double, 3> pos{0, 0, 0};   // x, y, z
-    std::array<double, 4> quat{1, 0, 0, 0}; // w, x, y, z (MuJoCo convention)
+    std::array<double, 3> pos{0, 0, 0};      // x, y, z
+    std::array<double, 4> quat{1, 0, 0, 0};  // w, x, y, z (MuJoCo convention)
 };
 
 class Backend {
-public:
+ public:
     virtual ~Backend() = default;
 
-    virtual hardware_interface::CallbackReturn init(
-        const hardware_interface::HardwareInfo& info,
-        rclcpp::Node::SharedPtr node) = 0;
+    virtual hardware_interface::CallbackReturn init(const hardware_interface::HardwareInfo& info,
+                                                    rclcpp::Node::SharedPtr node) = 0;
     virtual hardware_interface::CallbackReturn activate() = 0;
     virtual hardware_interface::CallbackReturn deactivate() = 0;
 

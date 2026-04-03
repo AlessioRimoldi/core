@@ -180,15 +180,25 @@ src/
 ## Build & Run
 
 ```bash
-# Build and start all services
+# Allow Docker to use the X11 display
 xhost +local:docker
-cd docker && docker compose up --build -d
+
+# Start all services
+./docker.sh start
+
+# Start with GPU acceleration
+./docker.sh start -g
+
+# Stop all services
+./docker.sh stop
 
 # ROS packages are built automatically on container startup.
-# To rebuild manually inside the container:
-docker exec -it env bash
-cd /ros2_ws && colcon build --symlink-install
-source install/setup.bash
+# To rebuild manually:
+./docker.sh build
+
+# Build specific packages (and their dependencies)
+./docker.sh build parol6_launch
+./docker.sh build parol6_launch core_rl
 ```
 
 ---
@@ -302,6 +312,33 @@ src/common/rl/
         ├── mlflow_logger.py          — MLflow experiment tracking
         └── grav_comp_collector.py    — Collects (q, dq, bias) data
 ```
+
+---
+
+## Code Quality & Pre-Commit
+
+The repo uses [pre-commit](https://pre-commit.com/) hooks configured in `.pre-commit-config.yaml`. Run `./scripts/setup.sh` to set up the environment and install hooks.
+
+### Hooks
+- **trailing-whitespace**, **end-of-file-fixer**, **check-yaml**, **check-xml**, **check-merge-conflict**, **check-added-large-files** (max 500 KB)
+- **black** — Python formatter (line length 120), scoped to `src/common/rl/`
+- **ruff** — Python linter with `--fix`, scoped to `src/`. Rules: `E, F, W, I, N, UP, B, SIM, PLC0415` (enforces imports at top of file)
+- **clang-format** — C/C++ formatter (Google base style, 120 col, indent 4). Config in `.clang-format`
+- **cpplint** — C/C++ linter (120 col, filters: `-build/include_subdir`, `-legal/copyright`, `-build/c++11`, `-build/include_order`, `-runtime/references`)
+- **cmake-format** — CMakeLists.txt formatter
+- **shellcheck** — Shell linter (`--severity=warning`)
+
+### Config Locations
+- `.pre-commit-config.yaml` — hook definitions (repo root, required by pre-commit)
+- `.clang-format` — C++ formatting rules (repo root, required by clang-format)
+- `pyproject.toml` — Black, Ruff config (`[tool.ruff]`, `[tool.black]` sections)
+
+### Conventions
+- All Python imports must be at the top of the file (enforced by `PLC0415`)
+- No lazy/deferred imports inside functions
+- C++ line length: 120 characters
+- Python line length: 120 characters (Black enforced)
+- `#include <memory>` must be present when using `unique_ptr` or `make_shared`
 
 ---
 

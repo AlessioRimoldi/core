@@ -26,45 +26,39 @@ find_package(mujoco_vendor REQUIRED)
 find_package(absl REQUIRED)
 
 # ── Shared library ────────────────────────────────────────────────────────────
-add_library(${PROJECT_NAME} SHARED
-  src/parol6_hardware_interface.cpp
-  src/parol6_backend.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/../../common/backend/mujoco_backend.cpp
-)
+add_library(
+  ${PROJECT_NAME} SHARED
+  src/parol6_hardware_interface.cpp src/parol6_backend.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../common/backend/mujoco_backend.cpp)
 
-target_include_directories(${PROJECT_NAME} PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:include>
-)
+target_include_directories(
+  ${PROJECT_NAME} PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+                         $<INSTALL_INTERFACE:include>)
 
 # common/backend headers live under src/
-target_include_directories(${PROJECT_NAME} PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}/../..
-)
+target_include_directories(${PROJECT_NAME}
+                           PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../..)
 
 # MuJoCo headers (mark as SYSTEM to suppress warnings)
-target_include_directories(${PROJECT_NAME} SYSTEM PUBLIC
-  ${mujoco_vendor_INCLUDE_DIRS}
-)
+target_include_directories(${PROJECT_NAME} SYSTEM
+                           PUBLIC ${mujoco_vendor_INCLUDE_DIRS})
 
-target_link_libraries(${PROJECT_NAME}
-  yaml-cpp
-  mujoco::mujoco
-  absl::synchronization
-)
+target_link_libraries(${PROJECT_NAME} yaml-cpp mujoco::mujoco
+                      absl::synchronization)
 
-ament_target_dependencies(${PROJECT_NAME}
+ament_target_dependencies(
+  ${PROJECT_NAME}
   hardware_interface
   rclcpp
   rclcpp_lifecycle
   pluginlib
   sensor_msgs
   tf2_ros
-  geometry_msgs
-)
+  geometry_msgs)
 
 # ── pluginlib export ──────────────────────────────────────────────────────────
-pluginlib_export_plugin_description_file(hardware_interface parol6_hardware_interface_plugin.xml)
+pluginlib_export_plugin_description_file(hardware_interface
+                                         parol6_hardware_interface_plugin.xml)
 
 # ── Install ───────────────────────────────────────────────────────────────────
 install(
@@ -72,13 +66,9 @@ install(
   EXPORT export_${PROJECT_NAME}
   LIBRARY DESTINATION lib
   ARCHIVE DESTINATION lib
-  RUNTIME DESTINATION bin
-)
+  RUNTIME DESTINATION bin)
 
-install(
-  DIRECTORY include/
-  DESTINATION include
-)
+install(DIRECTORY include/ DESTINATION include)
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
@@ -95,7 +85,6 @@ ament_export_dependencies(
   pluginlib
   sensor_msgs
   tf2_ros
-  geometry_msgs
-)
+  geometry_msgs)
 
 ament_package()

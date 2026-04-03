@@ -5,13 +5,12 @@ Reads object definitions (shape, size, color) from the scene YAML and listens
 to TF for each object's pose.  Publishes a visualization_msgs/MarkerArray on
 /scene_markers at 10 Hz.
 """
-import yaml
-
 import rclpy
 import rclpy.time
+import tf2_ros
+import yaml
 from rclpy.node import Node
 from visualization_msgs.msg import Marker, MarkerArray
-import tf2_ros
 
 
 class SceneMarkerPublisher(Node):
@@ -24,7 +23,7 @@ class SceneMarkerPublisher(Node):
             self.get_logger().error("No scene_file_path parameter provided")
             return
 
-        with open(scene_path, "r") as f:
+        with open(scene_path) as f:
             scene = yaml.safe_load(f)
 
         self.objects = scene.get("objects", [])
@@ -70,10 +69,10 @@ class SceneMarkerPublisher(Node):
             elif obj_type == "cylinder":
                 marker.type = Marker.CYLINDER
                 r = obj["radius"]
-                l = obj["length"]
+                length = obj["length"]
                 marker.scale.x = r * 2.0
                 marker.scale.y = r * 2.0
-                marker.scale.z = l
+                marker.scale.z = length
             else:
                 continue
 

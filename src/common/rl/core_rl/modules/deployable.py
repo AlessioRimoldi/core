@@ -59,7 +59,7 @@ class DeployablePolicy(nn.Module):
 
         # Extract q, dq from raw observation (always the first 2*n elements)
         q_current = obs[..., :n]
-        dq_current = obs[..., n:2*n]
+        dq_current = obs[..., n : 2 * n]
 
         # 1. Normalize observation
         obs_norm = self.normalizer(obs)

@@ -92,8 +92,8 @@ class GravCompCollectorCallback(BaseCallback):
         if obs.ndim > 1:
             obs = obs[0]
 
-        q = obs[:self.n]
-        dq = obs[self.n:2 * self.n]
+        q = obs[: self.n]
+        dq = obs[self.n : 2 * self.n]
 
         bias = self._query_bias(q, dq)
 

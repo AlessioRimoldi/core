@@ -21,9 +21,11 @@ _TASK_REGISTRY: dict[str, type] = {}
 
 def register_task(name: str):
     """Class decorator that registers a task by name."""
+
     def decorator(cls):
         _TASK_REGISTRY[name] = cls
         return cls
+
     return decorator
 
 
@@ -43,6 +45,7 @@ def list_tasks() -> list[str]:
 # Task spaces — returned by configure() to define obs/action spaces
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class TaskSpaces:
     observation_space: gym.Space
@@ -55,6 +58,7 @@ class TaskSpaces:
 # ---------------------------------------------------------------------------
 # Base task
 # ---------------------------------------------------------------------------
+
 
 class BaseTask(ABC):
     """Abstract base for RL tasks.

@@ -91,12 +91,8 @@ class MujocoRobotEnv(gym.Env):
         self.action_space = self._task_spaces.action_space
 
         # PD gains from robot config
-        self._kp = np.array(
-            [self.robot.gains[n].kp for n in self.robot.joint_names], dtype=np.float64
-        )
-        self._kd = np.array(
-            [self.robot.gains[n].kd for n in self.robot.joint_names], dtype=np.float64
-        )
+        self._kp = np.array([self.robot.gains[n].kp for n in self.robot.joint_names], dtype=np.float64)
+        self._kd = np.array([self.robot.gains[n].kd for n in self.robot.joint_names], dtype=np.float64)
 
         # Number of physics substeps per control step
         self._n_substeps = max(1, round(self.control_dt / self.physics_dt))
@@ -135,11 +131,13 @@ class MujocoRobotEnv(gym.Env):
 
         # Collect data for GravCompNet training
         if self._grav_comp_buffer is not None and len(self._grav_comp_buffer) < self._grav_comp_max_size:
-            self._grav_comp_buffer.append((
-                q.astype(np.float32).copy(),
-                dq.astype(np.float32).copy(),
-                grav_comp.astype(np.float32).copy(),
-            ))
+            self._grav_comp_buffer.append(
+                (
+                    q.astype(np.float32).copy(),
+                    dq.astype(np.float32).copy(),
+                    grav_comp.astype(np.float32).copy(),
+                )
+            )
 
         # PD control based on action type
         if self._task_spaces.action_type == "position":
@@ -175,7 +173,10 @@ class MujocoRobotEnv(gym.Env):
         return obs, reward, terminated, truncated, info
 
     def reset(
-        self, *, seed: int | None = None, options: dict | None = None,
+        self,
+        *,
+        seed: int | None = None,
+        options: dict | None = None,
     ) -> tuple[np.ndarray, dict[str, Any]]:
         super().reset(seed=seed)
 
@@ -224,6 +225,7 @@ def make_env(
     Pass a pre-resolved ``RobotConfig`` when using ``SubprocVecEnv`` to avoid
     race conditions from multiple subprocesses writing the same URDF file.
     """
+
     def _init():
         env = MujocoRobotEnv(
             robot=robot,
@@ -236,4 +238,5 @@ def make_env(
         )
         env.reset(seed=seed)
         return env
+
     return _init

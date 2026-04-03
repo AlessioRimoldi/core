@@ -44,8 +44,7 @@ class _ExtractedPolicyNet(torch.nn.Module):
             self._arch = "sac"
         else:
             raise ValueError(
-                f"Unsupported SB3 policy type: {type(sb3_policy)}. "
-                "Expected PPO MlpPolicy or SAC policy."
+                f"Unsupported SB3 policy type: {type(sb3_policy)}. " "Expected PPO MlpPolicy or SAC policy."
             )
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
@@ -93,7 +92,7 @@ def export_onnx(
     action_dim = n_joints  # Task dependent, but position targets = num_joints
     policy_net = _ExtractedPolicyNet(sb3_policy, action_dim)
     policy_net.eval()
-    print(f"  Policy: extracted MLP + action net")
+    print("  Policy: extracted MLP + action net")
 
     # ── 3. Gravity compensation network ──
     grav_comp = GravityCompensationNet(
@@ -167,9 +166,7 @@ def export_onnx(
         session = ort.InferenceSession(onnx_path)
         test_input = np.random.randn(1, obs_dim).astype(np.float32)
         outputs = session.run(None, {"observation": test_input})
-        assert outputs[0].shape == (1, n_joints), (
-            f"Expected output shape (1, {n_joints}), got {outputs[0].shape}"
-        )
+        assert outputs[0].shape == (1, n_joints), f"Expected output shape (1, {n_joints}), got {outputs[0].shape}"
         print(f"  ONNX validation: OK — output shape {outputs[0].shape}")
     except ImportError:
         print("  ONNX validation: skipped (onnxruntime not installed)")

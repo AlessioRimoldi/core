@@ -46,9 +46,5 @@ class PDController(nn.Module):
         if dq_target is None:
             dq_target = torch.zeros_like(dq_current)
 
-        tau = (
-            self.kp * (q_target - q_current)
-            + self.kd * (dq_target - dq_current)
-            + gravity_comp
-        )
+        tau = self.kp * (q_target - q_current) + self.kd * (dq_target - dq_current) + gravity_comp
         return tau

@@ -9,11 +9,9 @@ from __future__ import annotations
 import math
 import os
 import re
-import tempfile
 from dataclasses import dataclass, field
+from xml.etree import ElementTree
 
-import mujoco
-import numpy as np
 import yaml
 
 
@@ -72,20 +70,18 @@ def _find_rl_config(robot_name: str) -> str:
     for c in candidates:
         if os.path.isfile(c):
             return c
-    raise FileNotFoundError(
-        f"No rl_config.yaml found for robot '{robot_name}'. "
-        f"Searched: {candidates}"
-    )
+    raise FileNotFoundError(f"No rl_config.yaml found for robot '{robot_name}'. " f"Searched: {candidates}")
 
 
 # ---------------------------------------------------------------------------
 # URDF patching (ported from parol6.launch.py — robot-agnostic)
 # ---------------------------------------------------------------------------
 
+
 def _strip_legacy_blocks(urdf_text: str) -> str:
     """Remove ROS1-era <transmission> and <gazebo> blocks."""
-    urdf_text = re.sub(r'<transmission[\s\S]*?</transmission\s*>', '', urdf_text)
-    urdf_text = re.sub(r'<gazebo[\s\S]*?</gazebo\s*>', '', urdf_text)
+    urdf_text = re.sub(r"<transmission[\s\S]*?</transmission\s*>", "", urdf_text)
+    urdf_text = re.sub(r"<gazebo[\s\S]*?</gazebo\s*>", "", urdf_text)
     return urdf_text
 
 
@@ -98,8 +94,8 @@ def _strip_package_uris(urdf_text: str, patterns: list[str]) -> str:
 
 def _inject_mujoco_compiler(urdf_text: str) -> str:
     """Ensure fusestatic=false so scene bodies are individually addressable."""
-    if '<mujoco>' not in urdf_text:
-        closing = '</robot>'
+    if "<mujoco>" not in urdf_text:
+        closing = "</robot>"
         urdf_text = urdf_text.replace(
             closing,
             '  <mujoco><compiler fusestatic="false"/></mujoco>\n' + closing,
@@ -109,7 +105,7 @@ def _inject_mujoco_compiler(urdf_text: str) -> str:
 
 def _inject_scene_objects(urdf_text: str, scene_file_path: str) -> str:
     """Inject scene objects from YAML as URDF links/joints."""
-    with open(scene_file_path, "r") as f:
+    with open(scene_file_path) as f:
         scene = yaml.safe_load(f)
 
     if not scene or "objects" not in scene:
@@ -117,7 +113,7 @@ def _inject_scene_objects(urdf_text: str, scene_file_path: str) -> str:
 
     urdf_text = urdf_text.rstrip()
     if urdf_text.endswith("</robot>"):
-        urdf_text = urdf_text[:-len("</robot>")]
+        urdf_text = urdf_text[: -len("</robot>")]
 
     urdf_text += '\n  <mujoco><compiler fusestatic="false"/></mujoco>\n'
 
@@ -143,7 +139,7 @@ def _inject_scene_objects(urdf_text: str, scene_file_path: str) -> str:
 
         mass = obj.get("mass", 0.1 if dynamic else 0.01)
         if obj_type == "box":
-            sx2, sy2, sz2 = [s * 2 for s in obj["size"]]
+            sx2, sy2, sz2 = (s * 2 for s in obj["size"])
             ixx = mass / 12.0 * (sy2**2 + sz2**2)
             iyy = mass / 12.0 * (sx2**2 + sz2**2)
             izz = mass / 12.0 * (sx2**2 + sy2**2)
@@ -160,7 +156,7 @@ def _inject_scene_objects(urdf_text: str, scene_file_path: str) -> str:
         inertial = (
             f'<inertial><mass value="{mass}"/>'
             f'<inertia ixx="{ixx:.6g}" ixy="0" ixz="0" iyy="{iyy:.6g}" iyz="0" izz="{izz:.6g}"/>'
-            f'</inertial>'
+            f"</inertial>"
         )
         rgba = obj.get("color", [0.5, 0.5, 0.5, 1.0])
         joint_type = "floating" if dynamic else "fixed"
@@ -190,9 +186,7 @@ def _inject_scene_objects(urdf_text: str, scene_file_path: str) -> str:
 
 def _parse_urdf_joints(urdf_text: str, joint_names: list[str]) -> dict[str, JointLimits]:
     """Extract joint limits from URDF XML for the specified joints."""
-    import xml.etree.ElementTree as ET
-
-    root = ET.fromstring(urdf_text)
+    root = ElementTree.fromstring(urdf_text)
     limits: dict[str, JointLimits] = {}
 
     for joint_el in root.findall("joint"):
@@ -209,7 +203,10 @@ def _parse_urdf_joints(urdf_text: str, joint_names: list[str]) -> dict[str, Join
             )
         else:
             limits[name] = JointLimits(
-                lower=-math.pi, upper=math.pi, velocity=math.pi, effort=100.0,
+                lower=-math.pi,
+                upper=math.pi,
+                velocity=math.pi,
+                effort=100.0,
             )
 
     return limits
@@ -217,7 +214,8 @@ def _parse_urdf_joints(urdf_text: str, joint_names: list[str]) -> dict[str, Join
 
 def _load_gains(gains_path: str, joint_names: list[str], section: str = "sim") -> dict[str, JointGains]:
     """Load PD gains from a YAML file."""
-    gains_yaml = yaml.safe_load(open(gains_path, "r"))
+    with open(gains_path) as f:
+        gains_yaml = yaml.safe_load(f)
     gains: dict[str, JointGains] = {}
 
     if section not in gains_yaml:
@@ -247,7 +245,8 @@ def resolve_robot(robot_name: str, scene_file: str = "") -> RobotConfig:
     joint names, gains, and produces a MuJoCo-loadable MJCF file.
     """
     rl_config_path = _find_rl_config(robot_name)
-    rl_config = yaml.safe_load(open(rl_config_path, "r"))
+    with open(rl_config_path) as f:
+        rl_config = yaml.safe_load(f)
 
     # Resolve paths relative to rl_config.yaml location
     config_dir = os.path.dirname(rl_config_path)
@@ -264,7 +263,7 @@ def resolve_robot(robot_name: str, scene_file: str = "") -> RobotConfig:
     uri_patterns = rl_config.get("uri_strip_patterns", [])
 
     # Read and patch URDF
-    with open(urdf_path, "r") as f:
+    with open(urdf_path) as f:
         urdf_text = f.read()
 
     urdf_text = _strip_legacy_blocks(urdf_text)

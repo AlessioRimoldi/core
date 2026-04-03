@@ -1,13 +1,12 @@
 #pragma once
 
-#include "common/backend/backend.hpp"
-
 #include <array>
 #include <cstdint>
 #include <mutex>
 #include <string>
 #include <vector>
 
+#include "common/backend/backend.hpp"
 #include "rclcpp/rclcpp.hpp"
 
 namespace parol6_hardware_interface {
@@ -44,20 +43,19 @@ static constexpr uint8_t INPUT_PACKET_LEN = 52;   // payload length PC -> robot
 static constexpr uint8_t OUTPUT_PACKET_LEN = 56;  // payload length robot -> PC
 
 class Parol6Backend : public common::Backend {
-public:
+ public:
     Parol6Backend();
     ~Parol6Backend() override;
 
-    hardware_interface::CallbackReturn init(
-        const hardware_interface::HardwareInfo& info,
-        rclcpp::Node::SharedPtr node) override;
+    hardware_interface::CallbackReturn init(const hardware_interface::HardwareInfo& info,
+                                            rclcpp::Node::SharedPtr node) override;
     hardware_interface::CallbackReturn activate() override;
     hardware_interface::CallbackReturn deactivate() override;
 
     bool read(std::vector<common::MotorState>& states) override;
     void write(const std::vector<common::MotorCommand>& commands) override;
 
-private:
+ private:
     rclcpp::Logger logger_;
     rclcpp::Node::SharedPtr node_;
 
@@ -93,11 +91,8 @@ private:
     void close_serial();
 
     // Send a full command packet and receive the response
-    bool send_and_receive(
-        const std::array<int, kNumJoints>& positions,
-        const std::array<int, kNumJoints>& speeds,
-        uint8_t command,
-        RobotState& response);
+    bool send_and_receive(const std::array<int, kNumJoints>& positions, const std::array<int, kNumJoints>& speeds,
+                          uint8_t command, RobotState& response);
 
     // Low-level serial I/O
     bool write_bytes(const uint8_t* data, size_t len);

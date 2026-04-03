@@ -1,14 +1,15 @@
 #include "parol6_hardware_interface/parol6_backend.hpp"
 
+#include <fcntl.h>
+#include <poll.h>
+#include <termios.h>
+#include <unistd.h>
+
 #include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <cstring>
-#include <fcntl.h>
-#include <poll.h>
-#include <termios.h>
 #include <thread>
-#include <unistd.h>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -20,8 +21,7 @@ namespace parol6_hardware_interface {
 // Construction / Destruction
 // ---------------------------------------------------------------------------
 
-Parol6Backend::Parol6Backend()
-    : logger_(rclcpp::get_logger("parol6_backend")) {
+Parol6Backend::Parol6Backend() : logger_(rclcpp::get_logger("parol6_backend")) {
     // Precompute steps_per_radian for each joint
     for (size_t i = 0; i < kNumJoints; ++i) {
         steps_per_rad_[i] = (kStepsPerRev * kGearRatios[i]) / (2.0 * M_PI);
@@ -36,9 +36,8 @@ Parol6Backend::~Parol6Backend() {
 // Lifecycle
 // ---------------------------------------------------------------------------
 
-hardware_interface::CallbackReturn Parol6Backend::init(
-    const hardware_interface::HardwareInfo& info,
-    rclcpp::Node::SharedPtr node) {
+hardware_interface::CallbackReturn Parol6Backend::init(const hardware_interface::HardwareInfo& info,
+                                                       rclcpp::Node::SharedPtr node) {
     node_ = node;
 
     // Get serial port from hardware parameters
@@ -61,8 +60,7 @@ hardware_interface::CallbackReturn Parol6Backend::init(
         return hardware_interface::CallbackReturn::ERROR;
     }
 
-    RCLCPP_INFO(logger_, "PAROL6 backend initialized (port=%s, baud=%d)",
-                serial_port_.c_str(), baudrate_);
+    RCLCPP_INFO(logger_, "PAROL6 backend initialized (port=%s, baud=%d)", serial_port_.c_str(), baudrate_);
     return hardware_interface::CallbackReturn::SUCCESS;
 }
 
@@ -110,19 +108,16 @@ hardware_interface::CallbackReturn Parol6Backend::activate() {
         while (!all_joints_homed(response.homed_bits)) {
             auto elapsed = std::chrono::steady_clock::now() - start;
             if (elapsed > kHomingTimeout) {
-                RCLCPP_ERROR(logger_, "Homing timed out after 60s (homed_bits=0x%02X)",
-                             response.homed_bits);
+                RCLCPP_ERROR(logger_, "Homing timed out after 60s (homed_bits=0x%02X)", response.homed_bits);
                 close_serial();
                 return hardware_interface::CallbackReturn::ERROR;
             }
 
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             if (!send_and_receive(zeros, zeros, CMD_DUMMY, response)) {
-                RCLCPP_WARN_THROTTLE(logger_, *node_->get_clock(), 5000,
-                                     "Serial communication error during homing");
+                RCLCPP_WARN_THROTTLE(logger_, *node_->get_clock(), 5000, "Serial communication error during homing");
             } else {
-                RCLCPP_INFO_THROTTLE(logger_, *node_->get_clock(), 2000,
-                                     "Homing in progress... (homed_bits=0x%02X)",
+                RCLCPP_INFO_THROTTLE(logger_, *node_->get_clock(), 2000, "Homing in progress... (homed_bits=0x%02X)",
                                      response.homed_bits);
             }
         }
@@ -187,8 +182,7 @@ void Parol6Backend::write(const std::vector<common::MotorCommand>& commands) {
         std::lock_guard<std::mutex> lock(state_mu_);
         latest_state_ = response;
     } else {
-        RCLCPP_WARN_THROTTLE(logger_, *node_->get_clock(), 5000,
-                             "Serial communication error during write");
+        RCLCPP_WARN_THROTTLE(logger_, *node_->get_clock(), 5000, "Serial communication error during write");
     }
 }
 
@@ -207,7 +201,7 @@ bool Parol6Backend::open_serial(const std::string& port, int baudrate) {
     int flags = fcntl(serial_fd_, F_GETFL, 0);
     fcntl(serial_fd_, F_SETFL, flags & ~O_NONBLOCK);
 
-    struct termios tty{};
+    struct termios tty {};
     if (tcgetattr(serial_fd_, &tty) != 0) {
         RCLCPP_ERROR(logger_, "tcgetattr failed: %s", strerror(errno));
         close_serial();
@@ -217,10 +211,18 @@ bool Parol6Backend::open_serial(const std::string& port, int baudrate) {
     // Map baudrate to termios constant
     speed_t baud;
     switch (baudrate) {
-        case 3000000: baud = B3000000; break;
-        case 2000000: baud = B2000000; break;
-        case 1000000: baud = B1000000; break;
-        case 115200:  baud = B115200;  break;
+        case 3000000:
+            baud = B3000000;
+            break;
+        case 2000000:
+            baud = B2000000;
+            break;
+        case 1000000:
+            baud = B1000000;
+            break;
+        case 115200:
+            baud = B115200;
+            break;
         default:
             RCLCPP_ERROR(logger_, "Unsupported baudrate: %d", baudrate);
             close_serial();
@@ -232,11 +234,11 @@ bool Parol6Backend::open_serial(const std::string& port, int baudrate) {
     cfsetispeed(&tty, baud);
     cfsetospeed(&tty, baud);
 
-    tty.c_cflag |= (CLOCAL | CREAD);   // Enable receiver, local mode
-    tty.c_cflag &= ~CSTOPB;            // 1 stop bit
-    tty.c_cflag &= ~CRTSCTS;           // No hardware flow control
+    tty.c_cflag |= (CLOCAL | CREAD);  // Enable receiver, local mode
+    tty.c_cflag &= ~CSTOPB;           // 1 stop bit
+    tty.c_cflag &= ~CRTSCTS;          // No hardware flow control
     tty.c_cc[VMIN] = 0;
-    tty.c_cc[VTIME] = 1;               // 100ms inter-character timeout
+    tty.c_cc[VTIME] = 1;  // 100ms inter-character timeout
 
     tcflush(serial_fd_, TCIOFLUSH);
     if (tcsetattr(serial_fd_, TCSANOW, &tty) != 0) {
@@ -259,12 +261,8 @@ void Parol6Backend::close_serial() {
 // Protocol: send command + receive response
 // ---------------------------------------------------------------------------
 
-bool Parol6Backend::send_and_receive(
-    const std::array<int, kNumJoints>& positions,
-    const std::array<int, kNumJoints>& speeds,
-    uint8_t command,
-    RobotState& response) {
-
+bool Parol6Backend::send_and_receive(const std::array<int, kNumJoints>& positions,
+                                     const std::array<int, kNumJoints>& speeds, uint8_t command, RobotState& response) {
     // Build packet: start(3) + len(1) + payload(52) = 56 bytes total
     // Payload: joints(18) + speeds(18) + command(1) + affected(1) + inout(1) +
     //          timeout(1) + gripper(8) + crc(1) + end(2) = 52
@@ -399,12 +397,12 @@ bool Parol6Backend::read_response_packet(std::vector<uint8_t>& payload, int time
     auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
 
     while (std::chrono::steady_clock::now() < deadline) {
-        struct pollfd pfd{};
+        struct pollfd pfd {};
         pfd.fd = serial_fd_;
         pfd.events = POLLIN;
 
-        auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
-            deadline - std::chrono::steady_clock::now()).count();
+        auto remaining =
+            std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
         if (remaining <= 0) break;
 
         int ret = poll(&pfd, 1, static_cast<int>(remaining));
@@ -419,12 +417,16 @@ bool Parol6Backend::read_response_packet(std::vector<uint8_t>& payload, int time
                 if (byte == START_BYTE) state = State::SYNC2;
                 break;
             case State::SYNC2:
-                if (byte == START_BYTE) state = State::SYNC3;
-                else state = State::SYNC1;
+                if (byte == START_BYTE)
+                    state = State::SYNC3;
+                else
+                    state = State::SYNC1;
                 break;
             case State::SYNC3:
-                if (byte == START_BYTE) state = State::LENGTH;
-                else state = State::SYNC1;
+                if (byte == START_BYTE)
+                    state = State::LENGTH;
+                else
+                    state = State::SYNC1;
                 break;
             case State::LENGTH:
                 data_len = byte;
@@ -436,9 +438,7 @@ bool Parol6Backend::read_response_packet(std::vector<uint8_t>& payload, int time
                 payload[data_read++] = byte;
                 if (data_read >= data_len) {
                     // Verify end bytes
-                    if (data_len >= 2 &&
-                        payload[data_len - 2] == END_BYTE_1 &&
-                        payload[data_len - 1] == END_BYTE_2) {
+                    if (data_len >= 2 && payload[data_len - 2] == END_BYTE_1 && payload[data_len - 1] == END_BYTE_2) {
                         return true;
                     }
                     // Bad end bytes, reset and try again
@@ -488,9 +488,7 @@ void Parol6Backend::int_to_3bytes(int value, uint8_t* buf) {
 }
 
 int Parol6Backend::bytes3_to_int(const uint8_t* buf) {
-    int value = (static_cast<int>(buf[0]) << 16) |
-                (static_cast<int>(buf[1]) << 8) |
-                static_cast<int>(buf[2]);
+    int value = (static_cast<int>(buf[0]) << 16) | (static_cast<int>(buf[1]) << 8) | static_cast<int>(buf[2]);
     // Sign-extend from 24-bit
     if (value & 0x800000) {
         value |= ~0xFFFFFF;

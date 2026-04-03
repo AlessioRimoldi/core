@@ -8,15 +8,16 @@ from typing import Any
 import numpy as np
 import torch
 
-
 _ALGORITHM_REGISTRY: dict[str, type] = {}
 
 
 def register_algorithm(name: str):
     """Class decorator that registers an algorithm by name."""
+
     def decorator(cls):
         _ALGORITHM_REGISTRY[name] = cls
         return cls
+
     return decorator
 
 
@@ -40,8 +41,7 @@ class BaseAlgorithm(ABC):
     """
 
     @abstractmethod
-    def __init__(self, env, config: dict[str, Any], callbacks: list | None = None):
-        ...
+    def __init__(self, env, config: dict[str, Any], callbacks: list | None = None): ...
 
     @abstractmethod
     def train(self, total_timesteps: int):

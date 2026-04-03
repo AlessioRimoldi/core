@@ -6,9 +6,9 @@ Trained supervised on data collected during RL rollouts.
 
 from __future__ import annotations
 
+import numpy as np
 import torch
 import torch.nn as nn
-import numpy as np
 
 
 class GravityCompensationNet(nn.Module):

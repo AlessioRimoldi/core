@@ -5,11 +5,11 @@ Usage (inside the container):
   python3 /ros2_ws/core/src/parol6/parol6_launch/scripts/example_trajectory.py
 """
 import rclpy
+from builtin_interfaces.msg import Duration
+from control_msgs.action import FollowJointTrajectory
 from rclpy.action import ActionClient
 from rclpy.node import Node
-from control_msgs.action import FollowJointTrajectory
 from trajectory_msgs.msg import JointTrajectoryPoint
-from builtin_interfaces.msg import Duration
 
 JOINTS = ["L1", "L2", "L3", "L4", "L5", "L6"]
 
