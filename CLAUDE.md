@@ -194,11 +194,11 @@ xhost +local:docker
 
 # ROS packages are built automatically on container startup.
 # To rebuild manually:
-./docker.sh build
+./docker.sh build-packages
 
 # Build specific packages (and their dependencies)
-./docker.sh build parol6_launch
-./docker.sh build parol6_launch core_rl
+./docker.sh build-packages parol6_launch
+./docker.sh build-packages parol6_launch core_rl
 ```
 
 ---
@@ -223,13 +223,13 @@ A robot-agnostic RL training system. Uses **Brax** (Google's physics-based RL li
 ```
 train.py CLI → Algorithm (Brax PPO/SAC) → jax.vmap (4096+ parallel envs on GPU)
                     ↓ progress_fn hooks               ↓ MuJoCo MJX (JAX, no ROS2)
-              Redis Streams + MLflow         PD control + gravity comp (pure JAX, JIT'd)
+              Redis Streams + MLflow         PD control (pure JAX, JIT'd)
+                    ↓ policy_params_fn
+              VideoRecorderHook              SimBackend abstraction
+              (EGL offscreen render)         ├── MJXBackend (current)
+                                             └── IsaacSim / Newton (future)
 
-                    SimBackend abstraction
-                    ├── MJXBackend (current)
-                    └── IsaacSim / Newton (future)
-
-Export: make_deployable_fn(JAX) = Normalizer → Policy → GravCompNet → PDController
+Export: make_deployable_fn(JAX) = Normalizer → Policy → PDController
         → NumPy → PyTorch bridge → ONNX
 ```
 
@@ -297,11 +297,10 @@ Protocol-based backend system for future multi-simulator support:
 
 JAX parameters are extracted and bridged to PyTorch for ONNX export:
 1. **Normalizer** — mean/std extracted from Brax's `RunningStatisticsState`
-2. **Policy MLP** — weights/biases extracted from Flax params, mapped to `nn.Linear` layers
-3. **GravityCompensationNet** — Flax `nn.Module` trained post-hoc with Optax, same extraction
-4. **PDController** — `tau = kp*(q_d - q) + kd*(0 - dq) + grav_comp`
+2. **Policy MLP** — weights/biases extracted from Flax params, mapped to `nn.Linear` layers (Brax uses `hidden_N` layer naming; vanilla Flax uses `Dense_N`)
+3. **PDController** — `tau = kp*(q_d - q) + kd*(0 - dq)`
 
-GravComp data `(q, dq, qfrc_bias)` is collected by running the trained policy for N steps post-training via `collect_grav_comp_data()`, then a Flax MLP is trained supervised.
+Brax PPO/SAC outputs `[mean, log_std]` (double action dim); the export slices to mean-only for deterministic inference.
 
 ### Callbacks / Hooks
 
@@ -309,7 +308,8 @@ Brax uses `progress_fn(step, metrics)` hooks instead of SB3 `BaseCallback` objec
 - `compose_progress_fn(*hooks)` combines multiple hooks with exception isolation
 - **`MLflowHook`**: start/log/end lifecycle, artifact logging
 - **`RedisStreamHook`**: Redis Streams publishing (`rl:train:<experiment>:<run_id>:metrics`)
-- Simple print hook for console progress
+- **`VideoRecorderHook`**: `policy_params_fn` callback — runs JIT-compiled GPU rollout, renders via CPU MuJoCo (EGL offscreen), tiles into grid, saves MP4. Loads a separate MuJoCo model from MJCF with full visual meshes (the training model uses capsule-approximated geoms for MJX performance).
+- **tqdm progress bar**: inline hook for console progress
 
 ### Streaming
 
@@ -339,7 +339,6 @@ src/common/rl/
     │   ├── __init__.py               — BaseTask(PipelineEnv) + registry
     │   └── joint_tracking.py         — Joint position tracking task (pure JAX)
     ├── modules/
-    │   ├── gravity_comp.py           — Learned gravity compensation (Flax + Optax)
     │   ├── pd_controller.py          — PD controller (pure JAX function)
     │   ├── normalizer.py             — Observation normalizer (pure JAX)
     │   └── deployable.py             — Full deployable pipeline (JAX composition)
@@ -347,7 +346,7 @@ src/common/rl/
         ├── __init__.py               — compose_progress_fn() combiner
         ├── redis_stream.py           — Redis Streams hook
         ├── mlflow_logger.py          — MLflow hook
-        └── grav_comp_collector.py    — Post-training (q, dq, bias) collection
+        └── video_recorder.py         — Tiled eval rollout video recording (EGL offscreen)
 ```
 
 ---
@@ -394,6 +393,7 @@ The repo uses [pre-commit](https://pre-commit.com/) hooks configured in `.pre-co
 - **Pure JAX JIT-traceability**: All task `reset()` / `step()` functions, PD control, normalisation, and reward computation are pure functions operating on immutable `State` objects — required for `jax.jit` compilation across thousands of envs
 - **Episode state in State.info**: Since JIT-compiled functions can't use mutable instance variables, per-episode state (`q_target`, `step_count`, `qfrc_bias`) is carried in the `State.info` dict
 - **SimBackend Protocol**: Abstracts physics stepping behind `init()` / `step()` — currently only MJX, designed for future IsaacSim and Newton backends
-- **Post-hoc gravity comp**: GravComp data is collected by running the trained policy for N steps after training completes, then a Flax MLP is trained supervised — avoids complicating the JIT'd training loop
+- **Analytical gravity compensation at runtime**: Learned MLP gravity comp was removed from the training pipeline; gravity compensation will be computed analytically (e.g. via Pinocchio) at C++ runtime in the hardware interface
 - **PyTorch only for ONNX export**: JAX/Flax params are extracted to NumPy, loaded into thin PyTorch `nn.Module` wrappers, and exported via `torch.onnx.export()` — PyTorch is an optional dependency
 - **Brax progress_fn hooks**: Replace SB3's `BaseCallback` pattern; `compose_progress_fn()` combines multiple hooks with exception isolation so a Redis failure doesn't crash training
+- **Separate render model for video recording**: The training model (`env._mj_model`) uses capsule-approximated collision geoms for MJX GPU performance; `VideoRecorderHook` loads a separate CPU MuJoCo model from the original MJCF with full visual meshes for high-quality video rendering

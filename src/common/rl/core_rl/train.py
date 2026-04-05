@@ -74,6 +74,11 @@ def main():
     parser.add_argument("--no-export", action="store_true", help="Skip ONNX export")
     parser.add_argument("--num-evals", type=int, default=20, help="Number of eval points during training")
     parser.add_argument("--backend", type=str, default="mjx", help="Simulation backend (mjx)")
+    parser.add_argument("--record-video", action="store_true", help="Record tiled eval rollout videos")
+    parser.add_argument("--video-interval", type=int, default=5, help="Record video every N policy updates")
+    parser.add_argument(
+        "--video-envs", type=int, default=16, help="Number of envs in the video grid (must be a perfect square)"
+    )
     args = parser.parse_args()
 
     # Load config
@@ -187,6 +192,22 @@ def main():
     hooks.append(progress_hook)
     progress_fn = compose_progress_fn(*hooks)
 
+    # ── 3b. Video recording hook (policy_params_fn) ──
+    video_hook = None
+    if args.record_video:
+        from core_rl.callbacks.video_recorder import VideoRecorderHook
+
+        grid_side = int(args.video_envs**0.5)
+        video_hook = VideoRecorderHook(
+            env=env,
+            output_dir=output_dir,
+            record_interval=args.video_interval,
+            grid_cols=grid_side,
+            grid_rows=grid_side,
+            episode_length=env_cfg["max_episode_steps"],
+        )
+        print(f"  Video recording: every {args.video_interval} updates, {grid_side}x{grid_side} grid")
+
     print()
 
     # ── 4. Build algorithm config ──
@@ -206,6 +227,7 @@ def main():
         env=env,
         config=algo_cfg,
         progress_fn=progress_fn,
+        policy_params_fn=video_hook,
     )
 
     # ── 5. Train ──
@@ -245,6 +267,9 @@ def main():
 
     if redis_hook:
         redis_hook.end(total_timesteps=total_timesteps)
+
+    if video_hook:
+        video_hook.close()
 
     print(f"\nAll outputs in: {output_dir}")
 

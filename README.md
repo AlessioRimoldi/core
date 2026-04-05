@@ -123,18 +123,24 @@ ros2 topic echo /joint_states
 C++ changes (hardware interface, backends) require a rebuild:
 ```bash
 # Build all packages
-./docker.sh build
+./docker.sh build-packages
 
 # Build specific packages (and their dependencies)
-./docker.sh build parol6_launch
-./docker.sh build parol6_launch core_rl
+./docker.sh build-packages parol6_launch
+./docker.sh build-packages parol6_launch core_rl
+```
+
+To rebuild the Docker image itself (e.g. after changing the Dockerfile or pip dependencies):
+```bash
+./docker.sh build
+./docker.sh build -g  # GPU image
 ```
 
 Python changes (launch files, configs) take effect immediately thanks to `--symlink-install`.
 
 ## RL Training
 
-A robot-agnostic RL pipeline using MuJoCo Python bindings directly (no ROS2 overhead) for training throughput, with ONNX export for deployment.
+A robot-agnostic RL pipeline using **MuJoCo MJX** (GPU-accelerated physics via JAX) + **Brax** for massively parallel training across thousands of environments on a single GPU, with ONNX export for deployment via `ros2_control`.
 
 ```bash
 # Attach to the container
@@ -143,22 +149,25 @@ docker exec -it env bash
 # Source the workspace (required for core_rl to be importable)
 source /ros2_ws/install/setup.bash
 
-# Train with PPO (8 parallel envs, streams to Redis + MLflow)
-python -m core_rl.train --robot parol6 --task joint_tracking --algo ppo --num-envs 8
+# Train with PPO (4096 parallel envs on GPU, streams to Redis + MLflow)
+python -m core_rl.train --robot parol6 --task joint_tracking --algo ppo --num-envs 4096
 
 # Train with SAC, custom timesteps
 python -m core_rl.train --robot parol6 --task joint_tracking --algo sac \
-  --num-envs 16 --total-timesteps 2000000
+  --num-envs 4096 --total-timesteps 2000000
 
 # Offline training (no Redis/MLflow)
 python -m core_rl.train --robot parol6 --task joint_tracking --algo ppo \
-  --no-redis --no-mlflow --total-timesteps 50000
+  --no-redis --no-mlflow --num-envs 4096 --total-timesteps 500000
+
+# Record tiled eval rollout videos during training
+python -m core_rl.train --robot parol6 --task joint_tracking --algo ppo \
+  --num-envs 4096 --record-video --video-interval 5 --video-envs 16
 ```
 
 Training outputs are saved to `/ros2_ws/core/models/` (mounted at `docker/data/models/` on the host) and include:
-- SB3 model checkpoint
-- VecNormalize statistics
-- ONNX policy (with normalizer, policy MLP, gravity compensation, and PD controller baked in)
+- ONNX policy (with observation normalizer, policy MLP, and PD controller baked in)
+- Eval rollout videos (when `--record-video` is used)
 
 Monitor training at [http://localhost:5000](http://localhost:5000) (MLflow UI).
 
@@ -188,7 +197,10 @@ Create a Python file in `src/common/rl/core_rl/tasks/` with a `@register_task("n
 
 ```
 src/
-├── common/backend/              # Abstract Backend base class + MuJoCo backend
+├── common/
+│   ├── backend/                 # Abstract Backend base class + MuJoCo backend
+│   └── rl/                      # Robot-agnostic RL training pipeline (Brax + MJX)
+│       └── core_rl/             # Python package: train, export, tasks, algorithms
 └── parol6/
     ├── parol6_description/      # URDF/xacro, robot-specific config (PD gains)
     ├── parol6_hardware_interface/  # ros2_control SystemInterface plugin
