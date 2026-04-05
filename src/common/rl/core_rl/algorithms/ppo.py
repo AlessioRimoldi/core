@@ -100,6 +100,16 @@ class PPOAlgorithm(BaseAlgorithm):
         num_evals = brax_cfg.pop("num_evals", 20)
         episode_length = brax_cfg.pop("max_episode_steps", brax_cfg.pop("episode_length", 500))
 
+        # Brax requires: batch_size * num_minibatches % num_envs == 0
+        num_minibatches = brax_cfg.get("num_minibatches", 32)
+        if num_minibatches > num_envs:
+            num_minibatches = num_envs
+        batch_size = brax_cfg.get("batch_size", num_envs // num_minibatches)
+        if batch_size == 0 or batch_size * num_minibatches % num_envs != 0:
+            batch_size = num_envs // num_minibatches
+        brax_cfg["batch_size"] = batch_size
+        brax_cfg["num_minibatches"] = num_minibatches
+
         # Network factory kwargs are handled separately
         network_factory_kwargs = brax_cfg.pop("network_factory_kwargs", {})
         if network_factory_kwargs:

@@ -55,9 +55,3 @@ callbacks:
 
 export:
   onnx: true
-  gravity_comp:
-    enabled: true
-    hidden_dims: [256, 256]
-    train_epochs: 50
-    train_lr: 1.0e-3
-    buffer_size: 10_000      # Steps to collect post-training

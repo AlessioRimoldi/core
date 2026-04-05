@@ -13,10 +13,11 @@ import argparse
 import os
 import time
 
+import tqdm
 import yaml
 
 from core_rl.algorithms import get_algorithm
-from core_rl.callbacks import compose_progress_fn
+from core_rl.callbacks import ProgressFn, compose_progress_fn
 from core_rl.callbacks.mlflow_logger import MLflowHook
 from core_rl.callbacks.redis_stream import RedisStreamHook
 from core_rl.env import make_env
@@ -168,13 +169,22 @@ def main():
         hooks.append(mlflow_hook)
         print("  MLflow logging:   enabled")
 
-    # Add a simple print hook for console progress
-    def _print_progress(step: int, metrics: dict) -> None:
-        reward = metrics.get("eval/episode_reward", metrics.get("eval/episode_reward_mean", "?"))
-        sps = metrics.get("training/sps", "?")
-        print(f"  Step {step:>10d} | reward={reward} | SPS={sps}")
+    # Add a tqdm progress bar hook for console output
+    def _make_progress_hook(total: int) -> tuple[ProgressFn, tqdm.tqdm]:
+        pbar = tqdm.tqdm(total=total, unit="step", desc="Training", dynamic_ncols=True)
 
-    hooks.append(_print_progress)
+        def _hook(step: int, metrics: dict) -> None:
+            reward = metrics.get("eval/episode_reward", metrics.get("eval/episode_reward_mean", "?"))
+            sps = metrics.get("training/sps", "?")
+            sps_str = f"{sps:.0f}" if isinstance(sps, int | float) else str(sps)
+            pbar.set_postfix_str(f"reward={reward} SPS={sps_str}", refresh=False)
+            pbar.n = min(step, total)
+            pbar.refresh()
+
+        return _hook, pbar
+
+    progress_hook, pbar = _make_progress_hook(total_timesteps)
+    hooks.append(progress_hook)
     progress_fn = compose_progress_fn(*hooks)
 
     print()
@@ -202,6 +212,7 @@ def main():
     print(f"\nTraining for {total_timesteps} timesteps ({num_envs} parallel envs)...\n")
     t0 = time.time()
     make_policy, params, metrics = algorithm.train()
+    pbar.close()
     elapsed = time.time() - t0
     print(f"\nTraining complete in {elapsed:.1f}s ({total_timesteps / elapsed:.0f} steps/s)")
 
@@ -210,28 +221,7 @@ def main():
     algorithm.save(params_path, params)
     print(f"Params saved to {params_path}")
 
-    # ── 7. Collect gravity comp data & ONNX export ──
-    grav_comp_enabled = (
-        export_cfg.get("onnx", False)
-        and export_cfg.get("gravity_comp", {}).get("enabled", False)
-        and not args.no_export
-    )
-
-    grav_comp_data = None
-    if grav_comp_enabled:
-        from core_rl.callbacks.grav_comp_collector import collect_grav_comp_data
-
-        gc_cfg = export_cfg["gravity_comp"]
-        print(f"\nCollecting gravity comp data ({gc_cfg.get('buffer_size', 10_000)} steps)...")
-        grav_comp_data = collect_grav_comp_data(
-            env=env,
-            make_policy_fn=make_policy,
-            params=params,
-            num_steps=gc_cfg.get("buffer_size", 10_000),
-            seed=seed + 1000,
-        )
-        print(f"  Collected {len(grav_comp_data[0])} samples")
-
+    # ── 7. ONNX export ──
     if export_cfg.get("onnx", False) and not args.no_export:
         from core_rl.export_onnx import export_onnx
 
@@ -241,8 +231,6 @@ def main():
             params=params,
             robot=robot,
             output_dir=output_dir,
-            grav_comp_config=export_cfg.get("gravity_comp", {}),
-            grav_comp_data=grav_comp_data,
         )
         print(f"ONNX exported to {onnx_path}")
 

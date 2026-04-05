@@ -27,13 +27,13 @@ if [ "$command" == "start" ]; then
         echo "======================================================================"
         echo "Starting CORE"
         echo "======================================================================"
-        docker compose -f docker-compose.yaml up
+        docker compose -f docker-compose.yaml --profile cpu up
     fi
 elif [ "$command" == "stop" ]; then
     echo "======================================================================"
     echo "Stopping CORE"
     echo "======================================================================"
-    docker compose down
+    docker compose --profile cpu --profile gpu down
 elif [ "$command" == "build" ]; then
     if [ $# -gt 0 ]; then
         pkgs="$*"

@@ -9,12 +9,10 @@ PyTorch is only needed at export time — it is an optional ``[export]`` depende
 from __future__ import annotations
 
 import os
-from typing import Any
 
 import jax.numpy as jnp
 import numpy as np
 
-from core_rl.modules.gravity_comp import train_gravity_comp
 from core_rl.modules.normalizer import NormalizerParams, from_brax_normalizer
 from core_rl.modules.normalizer import to_numpy as norm_to_numpy
 from core_rl.robot import RobotConfig
@@ -95,7 +93,9 @@ def _build_torch_deployable(
             dq_current = obs[..., n : 2 * n]
 
             obs_norm = self.normalizer(obs)
-            action = self.policy(obs_norm)
+            raw_action = self.policy(obs_norm)
+            # Brax PPO outputs [mean, log_std]; take only the mean for deterministic inference
+            action = raw_action[..., :n]
 
             if self.grav_comp is not None:
                 gc_input = torch.cat([q_current, dq_current], dim=-1)
@@ -123,15 +123,23 @@ def _build_torch_deployable(
 def _extract_flax_mlp_layers(params: dict) -> list[tuple[np.ndarray, np.ndarray]]:
     """Extract (weight, bias) pairs from a Flax Dense-stack parameter dict.
 
-    Flax stores params as nested dicts like:
-    ``{'params': {'Dense_0': {'kernel': ..., 'bias': ...}, 'Dense_1': ...}}``
+    Flax stores params as nested dicts. Brax PPO uses ``hidden_0``, ``hidden_1``, …
+    while vanilla Flax uses ``Dense_0``, ``Dense_1``, … — we try both patterns.
     """
     p = params.get("params", params)
     layers = []
     i = 0
-    while f"Dense_{i}" in p:
-        kernel = np.asarray(p[f"Dense_{i}"]["kernel"])  # (in, out)
-        bias = np.asarray(p[f"Dense_{i}"]["bias"])  # (out,)
+    while True:
+        # Try Brax naming ("hidden_N") then Flax naming ("Dense_N")
+        key = None
+        for prefix in ("hidden_", "Dense_"):
+            if f"{prefix}{i}" in p:
+                key = f"{prefix}{i}"
+                break
+        if key is None:
+            break
+        kernel = np.asarray(p[key]["kernel"])  # (in, out)
+        bias = np.asarray(p[key]["bias"])  # (out,)
         # PyTorch Linear expects (out, in) weight
         layers.append((kernel.T, bias))
         i += 1
@@ -156,19 +164,20 @@ def export_onnx(
     params,
     robot: RobotConfig,
     output_dir: str,
-    grav_comp_config: dict[str, Any] | None = None,
-    grav_comp_data: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None,
     action_type: str = "position",
 ) -> str:
     """Export the trained policy as a deployable ONNX model.
+
+    The exported model composes: Normalizer -> Policy MLP -> PD Controller.
+    Gravity compensation is **not** included — it should be computed
+    analytically at runtime (e.g. via Pinocchio RNEA in the C++ hardware
+    interface).
 
     Args:
         make_policy_fn: ``make_policy`` function returned by Brax ``train()``.
         params: Trained parameters (JAX pytree from Brax).
         robot: RobotConfig for the robot.
         output_dir: Directory to write output files.
-        grav_comp_config: Config for gravity compensation training.
-        grav_comp_data: Optional pre-collected ``(q, dq, bias)`` data.
         action_type: ``"position"``, ``"velocity"``, or ``"torque"``.
 
     Returns:
@@ -176,7 +185,6 @@ def export_onnx(
     """
     import torch
 
-    gc_cfg = grav_comp_config or {}
     n_joints = robot.num_joints
     os.makedirs(output_dir, exist_ok=True)
 
@@ -198,41 +206,18 @@ def export_onnx(
     policy_layers = _extract_brax_policy_layers(params, make_policy_fn)
     print(f"  Policy: {len(policy_layers)} layers extracted")
 
-    # ── 3. Gravity compensation network ──
-    grav_comp_layers = None
-    if gc_cfg.get("enabled", False) and grav_comp_data is not None:
-        q_data, dq_data, bias_data = grav_comp_data
-        hidden_dims = tuple(gc_cfg.get("hidden_dims", [256, 256]))
-        print(f"  Training GravCompNet on {len(q_data)} samples...")
-
-        gc_model, gc_params, gc_history = train_gravity_comp(
-            num_joints=n_joints,
-            q_data=q_data,
-            dq_data=dq_data,
-            bias_data=bias_data,
-            hidden_dims=hidden_dims,
-            epochs=gc_cfg.get("train_epochs", 50),
-            lr=gc_cfg.get("train_lr", 1e-3),
-        )
-        final_loss = gc_history["loss"][-1]
-        print(f"  GravComp trained — final loss: {final_loss:.6f}")
-
-        grav_comp_layers = _extract_flax_mlp_layers(gc_params)
-    else:
-        print("  GravComp: skipped (no data or disabled)")
-
-    # ── 4. PD gains ──
+    # ── 3. PD gains ──
     kp = np.array([robot.gains[n].kp for n in robot.joint_names], dtype=np.float32)
     kd = np.array([robot.gains[n].kd for n in robot.joint_names], dtype=np.float32)
     print(f"  PD gains: kp={kp.tolist()}, kd={kd.tolist()}")
 
-    # ── 5. Build PyTorch deployable and export ONNX ──
+    # ── 4. Build PyTorch deployable and export ONNX ──
     deployable = _build_torch_deployable(
         normalizer_mean=norm_mean,
         normalizer_std=norm_std,
         normalizer_clip=norm_clip,
         policy_layers=policy_layers,
-        grav_comp_layers=grav_comp_layers,
+        grav_comp_layers=None,
         kp=kp,
         kd=kd,
         num_joints=n_joints,
@@ -256,7 +241,7 @@ def export_onnx(
     )
     print(f"  ONNX exported: {onnx_path}")
 
-    # ── 6. Validate with ONNX Runtime ──
+    # ── 5. Validate with ONNX Runtime ──
     try:
         import onnxruntime as ort
 

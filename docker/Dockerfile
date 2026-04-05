@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y \
 # Python virtual environment
 RUN python3 -m venv core
 ENV PATH="/core/bin:$PATH"
-RUN pip install mujoco mujoco-mjx brax jax[cuda12] flax optax empy lark numpy catkin_pkg mlflow redis
+RUN pip install mujoco mujoco-mjx brax jax[cuda12] flax optax empy lark numpy catkin_pkg mlflow redis tqdm
 
 # ONNX export dependencies (torch is heavy — installed separately for layer caching)
 RUN pip install onnx onnxruntime onnxscript torch --extra-index-url https://download.pytorch.org/whl/cpu
