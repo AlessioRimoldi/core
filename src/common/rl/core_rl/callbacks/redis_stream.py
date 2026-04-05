@@ -1,22 +1,32 @@
-"""Redis Streams callback for real-time metric publishing."""
+"""Redis Streams hook for real-time metric publishing.
+
+Replaces the SB3 ``BaseCallback`` with a simple callable that conforms to
+Brax's ``progress_fn(step, metrics)`` signature.
+
+Usage::
+
+    hook = RedisStreamHook(host="redis", port=6379)
+    hook.start(experiment="rl", run_id="ppo_run_1", meta={...})
+
+    # Pass hook as progress_fn to Brax train()
+    make_policy, params, metrics = ppo.train(..., progress_fn=hook)
+
+    hook.end(total_timesteps=1_000_000)
+"""
 
 from __future__ import annotations
 
 import os
 import time
+from typing import Any
 
-import numpy as np
 import redis
-from stable_baselines3.common.callbacks import BaseCallback
 
 
-class RedisStreamCallback(BaseCallback):
-    """Publishes training metrics to Redis Streams.
+class RedisStreamHook:
+    """Brax-compatible progress_fn that publishes metrics to Redis Streams.
 
-    Uses XADD to append metrics to a stream keyed by experiment/run.
-    Metrics are published every ``publish_freq`` steps.
-
-    Stream key format: ``rl:train:<experiment>:<run_id>:metrics``
+    Call ``start()`` before training and ``end()`` after.
     """
 
     def __init__(
@@ -24,89 +34,69 @@ class RedisStreamCallback(BaseCallback):
         host: str = "redis",
         port: int = 6379,
         password: str = "",
-        experiment: str = "default",
-        run_id: str = "",
-        publish_freq: int = 100,
-        verbose: int = 0,
     ):
-        super().__init__(verbose)
         self.host = host
         self.port = port
         self.password = password or os.environ.get("REDIS_PASS", "")
-        self.experiment = experiment
-        self.run_id = run_id or f"run_{int(time.time())}"
-        self.publish_freq = publish_freq
 
-        self._client = None
+        self._client: redis.Redis | None = None
         self._stream_key = ""
-        self._episode_rewards: list[float] = []
-        self._episode_lengths: list[int] = []
+        self._meta_key = ""
 
-    def _init_callback(self) -> bool:
+    def start(
+        self,
+        experiment: str = "default",
+        run_id: str = "",
+        meta: dict[str, Any] | None = None,
+    ):
+        """Connect to Redis and publish run metadata."""
         self._client = redis.Redis(
             host=self.host,
             port=self.port,
             password=self.password if self.password else None,
             decode_responses=True,
         )
-        self._stream_key = f"rl:train:{self.experiment}:{self.run_id}:metrics"
 
-        # Publish run metadata
-        meta_key = f"rl:train:{self.experiment}:{self.run_id}:meta"
-        self._client.hset(
-            meta_key,
-            mapping={
-                "experiment": self.experiment,
-                "run_id": self.run_id,
-                "start_time": str(time.time()),
-                "num_envs": str(self.training_env.num_envs),
-            },
-        )
+        run_id = run_id or f"run_{int(time.time())}"
+        self._stream_key = f"rl:train:{experiment}:{run_id}:metrics"
+        self._meta_key = f"rl:train:{experiment}:{run_id}:meta"
 
-        if self.verbose:
-            print(f"Redis callback initialized — stream: {self._stream_key}")
-        return True
+        meta_payload = {
+            "experiment": experiment,
+            "run_id": run_id,
+            "start_time": str(time.time()),
+        }
+        if meta:
+            meta_payload.update({k: str(v) for k, v in meta.items()})
 
-    def _on_step(self) -> bool:
-        # Collect per-episode stats from info dicts
-        infos = self.locals.get("infos", [])
-        for info in infos:
-            if "episode" in info:
-                self._episode_rewards.append(info["episode"]["r"])
-                self._episode_lengths.append(info["episode"]["l"])
+        self._client.hset(self._meta_key, mapping=meta_payload)
 
-        if self.num_timesteps % self.publish_freq != 0:
-            return True
+    def __call__(self, step: int, metrics: dict[str, Any]) -> None:
+        """Publish metrics via XADD at each Brax eval boundary."""
+        if self._client is None:
+            return
 
-        # Build metric payload
-        metrics: dict[str, str] = {
-            "step": str(self.num_timesteps),
+        payload: dict[str, str] = {
+            "step": str(step),
             "time": str(time.time()),
         }
 
-        if self._episode_rewards:
-            metrics["mean_reward"] = f"{np.mean(self._episode_rewards):.4f}"
-            metrics["mean_ep_length"] = f"{np.mean(self._episode_lengths):.1f}"
-            metrics["num_episodes"] = str(len(self._episode_rewards))
-            self._episode_rewards.clear()
-            self._episode_lengths.clear()
-
-        # Add training loss metrics if available
-        if hasattr(self.model, "logger") and self.model.logger is not None:
-            for key, value in self.model.logger.name_to_value.items():
-                safe_key = key.replace("/", "_")
-                metrics[safe_key] = f"{value:.6f}"
+        for key, value in metrics.items():
+            safe_key = key.replace("/", "_")
+            try:
+                payload[safe_key] = f"{float(value):.6f}"
+            except (TypeError, ValueError):
+                continue
 
         try:
-            self._client.xadd(self._stream_key, metrics, maxlen=100_000)
+            self._client.xadd(self._stream_key, payload, maxlen=100_000)
         except Exception as e:
-            if self.verbose:
-                print(f"Redis publish error: {e}")
+            print(f"Redis publish error: {e}")
 
-        return True
-
-    def _on_training_end(self) -> None:
-        if self._client:
-            end_key = f"rl:train:{self.experiment}:{self.run_id}:meta"
-            self._client.hset(end_key, "end_time", str(time.time()))
-            self._client.hset(end_key, "total_timesteps", str(self.num_timesteps))
+    def end(self, total_timesteps: int = 0):
+        """Write end timestamp to Redis metadata."""
+        if self._client is None:
+            return
+        self._client.hset(self._meta_key, "end_time", str(time.time()))
+        if total_timesteps:
+            self._client.hset(self._meta_key, "total_timesteps", str(total_timesteps))

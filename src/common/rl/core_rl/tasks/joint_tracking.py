@@ -1,151 +1,188 @@
-"""Joint position tracking task.
+"""Joint position tracking task — pure JAX / Brax.
 
 The agent must move joints to randomly sampled target positions.
+All methods are pure-functional and JAX-traceable for ``jax.vmap``
+vectorisation across thousands of environments.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-import gymnasium as gym
-import mujoco
-import numpy as np
+import brax.envs.base as brax_env
+import jax
+import jax.numpy as jnp
+from brax import base as brax_base
 
 from core_rl.robot import RobotConfig
-from core_rl.tasks import BaseTask, TaskSpaces, register_task
+from core_rl.tasks import BaseTask, register_task
 
 
 @register_task("joint_tracking")
 class JointTrackingTask(BaseTask):
     """Track random joint position targets.
 
-    Observation: [q, dq, q_target]  (3 * num_joints)
-    Action:      [delta_q] or [q_target] depending on action_type config
-    Reward:      -||q - q_target||^2 - alpha * ||dq||^2 + bonus
-    Done:        when error < threshold or max steps reached
+    Observation: ``[q, dq, q_target]``  (3 × num_joints)
+    Action:      joint position targets (passed through PD control)
+    Reward:      ``-||q - q_target||² - α·||dq||² + bonus``
+
+    Episode state (``q_target``, step counter) is stored in
+    ``State.info`` so that everything is JIT-traceable.
     """
 
     def __init__(
         self,
-        action_type: str = "position",
+        robot: RobotConfig,
         reward_scale: float = 1.0,
         velocity_penalty: float = 0.01,
         success_threshold: float = 0.05,
         success_bonus: float = 10.0,
         target_range_fraction: float = 0.8,
+        max_episode_steps: int = 500,
+        backend: str = "mjx",
+        n_frames: int = 10,
+        **kwargs: Any,
     ):
-        self.action_type = action_type
+        super().__init__(robot=robot, backend=backend, n_frames=n_frames, **kwargs)
+
         self.reward_scale = reward_scale
         self.velocity_penalty = velocity_penalty
         self.success_threshold = success_threshold
         self.success_bonus = success_bonus
         self.target_range_fraction = target_range_fraction
+        self.max_episode_steps = max_episode_steps
 
-        self._q_target: np.ndarray | None = None
-        self._joint_q_indices: list[int] = []
-        self._joint_dof_indices: list[int] = []
+        # Pre-compute target sampling bounds (JAX arrays)
+        mid = (self._q_lower + self._q_upper) / 2.0
+        half = (self._q_upper - self._q_lower) / 2.0 * target_range_fraction
+        self._target_lo = mid - half
+        self._target_hi = mid + half
 
-    def configure(self, robot: RobotConfig, model: mujoco.MjModel) -> TaskSpaces:
-        n = robot.num_joints
+        # Pre-compute initial position sampling bounds (30% of range)
+        init_half = (self._q_upper - self._q_lower) / 2.0 * 0.3
+        self._init_lo = mid - init_half
+        self._init_hi = mid + init_half
 
-        # Resolve MuJoCo joint indices
-        self._joint_q_indices = []
-        self._joint_dof_indices = []
-        for name in robot.joint_names:
-            jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, name)
-            if jid < 0:
-                raise ValueError(f"Joint '{name}' not found in MuJoCo model")
-            self._joint_q_indices.append(model.jnt_qposadr[jid])
-            self._joint_dof_indices.append(model.jnt_dofadr[jid])
+    # -- Brax Env interface -----------------------------------------------
 
-        # Observation: [q, dq, q_target]
-        obs_low = np.full(3 * n, -np.inf, dtype=np.float32)
-        obs_high = np.full(3 * n, np.inf, dtype=np.float32)
-        observation_space = gym.spaces.Box(obs_low, obs_high, dtype=np.float32)
+    @property
+    def observation_size(self) -> int:
+        return 3 * self.robot.num_joints
 
-        # Action: joint position targets (within limits)
-        act_low = np.array(
-            [robot.joint_limits[name].lower for name in robot.joint_names],
-            dtype=np.float32,
-        )
-        act_high = np.array(
-            [robot.joint_limits[name].upper for name in robot.joint_names],
-            dtype=np.float32,
-        )
-        action_space = gym.spaces.Box(act_low, act_high, dtype=np.float32)
+    @property
+    def action_size(self) -> int:
+        return self.robot.num_joints
 
-        return TaskSpaces(
-            observation_space=observation_space,
-            action_space=action_space,
-            obs_components=["q", "dq", "q_target"],
-            action_type=self.action_type,
-        )
+    def reset(self, rng: jax.Array) -> brax_env.State:
+        """Pure-functional episode reset."""
+        rng, rng_target, rng_init = jax.random.split(rng, 3)
+        n = self.robot.num_joints
 
-    def reset(
-        self,
-        robot: RobotConfig,
-        model: mujoco.MjModel,
-        data: mujoco.MjData,
-        np_random: np.random.Generator,
-    ) -> np.ndarray:
-        # Sample random target within a fraction of joint limits
-        frac = self.target_range_fraction
-        targets = []
-        for name in robot.joint_names:
-            lim = robot.joint_limits[name]
-            mid = (lim.lower + lim.upper) / 2.0
-            half = (lim.upper - lim.lower) / 2.0 * frac
-            targets.append(np_random.uniform(mid - half, mid + half))
+        # Sample random target within joint limits
+        q_target = jax.random.uniform(rng_target, shape=(n,), minval=self._target_lo, maxval=self._target_hi)
 
-        self._q_target = np.array(targets, dtype=np.float32)
+        # Sample random initial position
+        q_init = jax.random.uniform(rng_init, shape=(n,), minval=self._init_lo, maxval=self._init_hi)
 
-        # Reset robot to a random initial position (small perturbation from zero)
-        for i, idx in enumerate(self._joint_q_indices):
-            lim = robot.joint_limits[robot.joint_names[i]]
-            half = (lim.upper - lim.lower) / 2.0 * 0.3
-            mid = (lim.lower + lim.upper) / 2.0
-            data.qpos[idx] = np_random.uniform(mid - half, mid + half)
+        # Build full q / qd vectors (all DOFs, not just robot joints)
+        q = jnp.zeros(self.sys.q_size())
+        q = q.at[self._joint_q_indices].set(q_init)
+        qd = jnp.zeros(self.sys.qd_size())
 
-        for idx in self._joint_dof_indices:
-            data.qvel[idx] = 0.0
+        # Initialise physics state via the pipeline
+        pipeline_state = self.pipeline_init(q, qd)
 
-        mujoco.mj_forward(model, data)
-        return self.compute_observation(robot, model, data)
+        # Build observation
+        obs = self._compute_obs(pipeline_state, q_target)
 
-    def compute_observation(
-        self,
-        robot: RobotConfig,
-        model: mujoco.MjModel,
-        data: mujoco.MjData,
-    ) -> np.ndarray:
-        q = np.array([data.qpos[i] for i in self._joint_q_indices], dtype=np.float32)
-        dq = np.array([data.qvel[i] for i in self._joint_dof_indices], dtype=np.float32)
-        return np.concatenate([q, dq, self._q_target])
+        # Compute initial reward (for State)
+        reward = jnp.float32(0.0)
+        done = jnp.float32(0.0)
 
-    def compute_reward(
-        self,
-        robot: RobotConfig,
-        model: mujoco.MjModel,
-        data: mujoco.MjData,
-        action: np.ndarray,
-    ) -> tuple[float, bool, dict[str, Any]]:
-        q = np.array([data.qpos[i] for i in self._joint_q_indices])
-        dq = np.array([data.qvel[i] for i in self._joint_dof_indices])
-
-        pos_error = np.linalg.norm(q - self._q_target)
-        vel_norm = np.linalg.norm(dq)
-
-        reward = -(pos_error**2) - self.velocity_penalty * (vel_norm**2)
-        reward *= self.reward_scale
-
-        success = pos_error < self.success_threshold
-        if success:
-            reward += self.success_bonus
-
+        # Store episode-level state in info
         info = {
-            "pos_error": float(pos_error),
-            "vel_norm": float(vel_norm),
-            "success": success,
+            "q_target": q_target,
+            "step": jnp.int32(0),
+            # Gravity-comp data for post-training collection
+            "qfrc_bias": self._get_qfrc_bias(pipeline_state),
+            # Brax wrappers expect truncation from the start
+            "truncation": jnp.float32(0.0),
         }
 
-        return float(reward), False, info
+        metrics = {
+            "pos_error": jnp.float32(0.0),
+            "vel_norm": jnp.float32(0.0),
+            "success": jnp.float32(0.0),
+            "reward": jnp.float32(0.0),
+        }
+
+        return brax_env.State(pipeline_state, obs, reward, done, metrics, info)
+
+    def step(self, state: brax_env.State, action: jax.Array) -> brax_env.State:
+        """Pure-functional environment step with PD control."""
+        pipeline_state = state.pipeline_state
+        q_target_episode = state.info["q_target"]
+        step_count = state.info["step"]
+
+        # Get current joint state
+        q = self._get_joint_q(pipeline_state)
+        qd = self._get_joint_qd(pipeline_state)
+        qfrc_bias = self._get_qfrc_bias(pipeline_state)
+
+        # Clip action to joint limits (policy outputs position targets)
+        action = jnp.clip(action, self._q_lower, self._q_upper)
+
+        # PD control: compute torques from position targets
+        ctrl = self._pd_control(q_target=action, q=q, qd=qd, qfrc_bias=qfrc_bias)
+
+        # Step physics (PipelineEnv handles n_frames sub-stepping)
+        next_pipeline_state = self.pipeline_step(pipeline_state, ctrl)
+
+        # Compute obs, reward, done
+        next_q = self._get_joint_q(next_pipeline_state)
+        next_qd = self._get_joint_qd(next_pipeline_state)
+
+        obs = self._compute_obs(next_pipeline_state, q_target_episode)
+
+        pos_error = jnp.linalg.norm(next_q - q_target_episode)
+        vel_norm = jnp.linalg.norm(next_qd)
+
+        reward = -(pos_error**2) - self.velocity_penalty * (vel_norm**2)
+        reward = reward * self.reward_scale
+
+        success = pos_error < self.success_threshold
+        reward = reward + jnp.where(success, self.success_bonus, 0.0)
+
+        next_step = step_count + 1
+        done = jnp.where(next_step >= self.max_episode_steps, 1.0, 0.0)
+
+        # Preserve wrapper-injected keys (EpisodeWrapper, AutoResetWrapper)
+        info = {**state.info}
+        info.update(
+            {
+                "q_target": q_target_episode,
+                "step": next_step,
+                "qfrc_bias": self._get_qfrc_bias(next_pipeline_state),
+                "truncation": done,
+            }
+        )
+
+        metrics = {**state.metrics}
+        metrics.update(
+            {
+                "pos_error": pos_error,
+                "vel_norm": vel_norm,
+                "success": success.astype(jnp.float32),
+                "reward": reward,
+            }
+        )
+
+        return brax_env.State(next_pipeline_state, obs, reward, done, metrics, info)
+
+    # -- internal helpers -------------------------------------------------
+
+    def _compute_obs(self, pipeline_state: brax_base.State, q_target: jax.Array) -> jax.Array:
+        """Build observation: [q, dq, q_target]."""
+        q = self._get_joint_q(pipeline_state)
+        qd = self._get_joint_qd(pipeline_state)
+        return jnp.concatenate([q, qd, q_target])

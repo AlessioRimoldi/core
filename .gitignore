@@ -1,5 +1,6 @@
 # Docker volume
 /docker/data
+__pycache__
 .txt
 .TXT
 .vscode

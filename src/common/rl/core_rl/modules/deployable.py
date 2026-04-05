@@ -1,88 +1,86 @@
-"""Deployable policy — composes all computation layers into a single Module.
+"""Deployable policy — composes all computation layers (JAX).
 
-The forward pass: raw_obs → normalize → policy → PD control (with gravity comp) → torques
+The forward pass: ``raw_obs → normalize → policy → PD control (with gravity comp) → torques``
 
-This is the module exported to ONNX for sim-to-real deployment.
+At training time this is used for evaluation.  For real deployment, the
+``export_onnx`` module converts these JAX functions + params into a single
+PyTorch ``nn.Module`` for ``torch.onnx.export``.
 """
 
 from __future__ import annotations
 
-import torch
-import torch.nn as nn
+from collections.abc import Callable
+from typing import Any, NamedTuple
 
-from core_rl.modules.gravity_comp import GravityCompensationNet
-from core_rl.modules.normalizer import ObservationNormalizer
-from core_rl.modules.pd_controller import PDController
+import jax
+import jax.numpy as jnp
+
+from core_rl.modules.gravity_comp import GravityCompNet
+from core_rl.modules.normalizer import NormalizerParams, normalize
+from core_rl.modules.pd_controller import PDGains, pd_control
 
 
-class DeployablePolicy(nn.Module):
-    """Full deployment pipeline as a single nn.Module.
+class DeployableParams(NamedTuple):
+    """All parameters needed for the full deployable pipeline."""
 
-    Input:  raw observation [q, dq, q_target, ...]  (depends on task)
-    Output: joint torques to apply
+    normalizer: NormalizerParams
+    # policy_fn is a closure over policy params (from Brax make_policy)
+    gravity_comp_params: Any  # Flax pytree (or None if untrained)
+    pd_gains: PDGains
+    num_joints: int
 
-    Layers:
-        1. ObservationNormalizer — standardize inputs
-        2. Policy network — map observation to action (joint position targets)
-        3. GravityCompensationNet — predict gravity/Coriolis torques from (q, dq)
-        4. PDController — convert position targets + grav comp to torques
+
+def make_deployable_fn(
+    policy_fn: Callable[[jax.Array], jax.Array],
+    gravity_comp_model: GravityCompNet | None,
+    params: DeployableParams,
+    action_type: str = "position",
+) -> Callable[[jax.Array], jax.Array]:
+    """Build a full inference function: ``obs → torques``.
+
+    Args:
+        policy_fn: Deterministic policy function ``obs → action`` (from Brax).
+        gravity_comp_model: Flax ``GravityCompNet`` (or ``None`` for zeros).
+        params: ``DeployableParams`` containing normalizer, gains, etc.
+        action_type: ``"position"``, ``"velocity"``, or ``"torque"``.
+
+    Returns:
+        A JAX function ``obs → torques``.
     """
+    n = params.num_joints
 
-    def __init__(
-        self,
-        normalizer: ObservationNormalizer,
-        policy_net: nn.Module,
-        gravity_comp: GravityCompensationNet,
-        pd_controller: PDController,
-        num_joints: int,
-        action_type: str = "position",
-    ):
-        super().__init__()
-        self.normalizer = normalizer
-        self.policy_net = policy_net
-        self.gravity_comp = gravity_comp
-        self.pd_controller = pd_controller
-        self.num_joints = num_joints
-        self.action_type = action_type
-
-    def forward(self, obs: torch.Tensor) -> torch.Tensor:
-        """Full inference pipeline.
-
-        Args:
-            obs: Raw observation tensor, shape (batch, obs_dim).
-                 Expected to contain [q, dq, ...] as first 2*num_joints elements.
-
-        Returns:
-            Joint torques, shape (batch, num_joints).
-        """
-        n = self.num_joints
-
-        # Extract q, dq from raw observation (always the first 2*n elements)
+    def _forward(obs: jax.Array) -> jax.Array:
+        # Extract q, dq from raw observation (first 2*n elements by convention)
         q_current = obs[..., :n]
         dq_current = obs[..., n : 2 * n]
 
-        # 1. Normalize observation
-        obs_norm = self.normalizer(obs)
+        # 1. Normalize
+        obs_norm = normalize(params.normalizer, obs)
 
-        # 2. Policy inference → action
-        action = self.policy_net(obs_norm)
+        # 2. Policy
+        action = policy_fn(obs_norm)
 
         # 3. Gravity compensation
-        grav_comp = self.gravity_comp(q_current, dq_current)
+        if gravity_comp_model is not None and params.gravity_comp_params is not None:
+            grav_comp = gravity_comp_model.apply(params.gravity_comp_params, q_current, dq_current)
+        else:
+            grav_comp = jnp.zeros_like(q_current)
 
-        # 4. PD control to produce torques
-        if self.action_type == "position":
-            torques = self.pd_controller(
+        # 4. PD control
+        if action_type == "position":
+            torques = pd_control(
+                gains=params.pd_gains,
                 q_target=action,
                 q_current=q_current,
                 dq_current=dq_current,
                 gravity_comp=grav_comp,
             )
-        elif self.action_type == "torque":
+        elif action_type == "torque":
             torques = action + grav_comp
-        else:
-            torques = self.pd_controller(
-                q_target=q_current,  # Hold position
+        else:  # velocity
+            torques = pd_control(
+                gains=params.pd_gains,
+                q_target=q_current,
                 q_current=q_current,
                 dq_current=dq_current,
                 gravity_comp=grav_comp,
@@ -90,3 +88,5 @@ class DeployablePolicy(nn.Module):
             )
 
         return torques
+
+    return _forward

@@ -3,7 +3,7 @@
 <package format="3">
   <name>core_rl</name>
   <version>0.1.0</version>
-  <description>Robot-agnostic RL training pipeline with MuJoCo, Redis streaming, MLflow tracking, and ONNX export</description>
+  <description>Robot-agnostic RL training pipeline with Brax, MJX, JAX, Redis streaming, MLflow tracking, and ONNX export</description>
   <maintainer email="root@todo.todo">root</maintainer>
   <license>TODO: License declaration</license>
 

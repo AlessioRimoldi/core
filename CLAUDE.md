@@ -2,7 +2,7 @@
 
 ## Overview
 
-This repository is a **robotics infrastructure** for training, evaluating, and deploying robot policies. It uses **ROS2 Jazzy** (Ubuntu 24.04 Noble) with `ros2_control`, **MuJoCo** physics simulation, and Docker Compose orchestration. The first supported robot is the **PAROL6** 6-DOF desktop robotic arm.
+This repository is a **robotics infrastructure** for training, evaluating, and deploying robot policies. It uses **ROS2 Jazzy** (Ubuntu 24.04 Noble) with `ros2_control`, **MuJoCo MJX** (GPU-accelerated physics via JAX) + **Brax** (RL training), and Docker Compose orchestration. The first supported robot is the **PAROL6** 6-DOF desktop robotic arm.
 
 ---
 
@@ -216,17 +216,30 @@ xhost +local:docker
 
 ## RL Training Pipeline (`src/common/rl/`)
 
-A robot-agnostic RL training system. Uses MuJoCo Python bindings directly (no ROS2) for training throughput, then exports ONNX for deployment via `ros2_control`.
+A robot-agnostic RL training system. Uses **Brax** (Google's physics-based RL library) with **MuJoCo MJX** (GPU-accelerated MuJoCo via JAX) for massively parallel training across thousands of environments on a single GPU. Exports ONNX for deployment via `ros2_control`.
 
 ### Architecture
 
 ```
-train.py CLI → Algorithm (PPO/SAC/...) → SubprocVecEnv (N parallel MujocoRobotEnvs)
-                    ↓ callbacks                        ↓ MuJoCo Python (no ROS2)
-              Redis Streams + MLflow            PD control + gravity comp (NumPy)
+train.py CLI → Algorithm (Brax PPO/SAC) → jax.vmap (4096+ parallel envs on GPU)
+                    ↓ progress_fn hooks               ↓ MuJoCo MJX (JAX, no ROS2)
+              Redis Streams + MLflow         PD control + gravity comp (pure JAX, JIT'd)
 
-Export: DeployablePolicy(nn.Module) = Normalizer → Policy → GravCompNet → PDController → ONNX
+                    SimBackend abstraction
+                    ├── MJXBackend (current)
+                    └── IsaacSim / Newton (future)
+
+Export: make_deployable_fn(JAX) = Normalizer → Policy → GravCompNet → PDController
+        → NumPy → PyTorch bridge → ONNX
 ```
+
+### Key Technologies
+- **JAX** — Automatic differentiation, JIT compilation, GPU vectorisation via `jax.vmap`
+- **Brax** — RL training loops (`brax.training.agents.ppo`, `brax.training.agents.sac`) with built-in observation normalisation, eval scheduling, and `progress_fn` hooks
+- **MuJoCo MJX** — GPU-accelerated MuJoCo via `brax.mjx.pipeline` (replaces CPU-bound MuJoCo Python bindings)
+- **Flax Linen** — Neural network definitions (`nn.Module` subclasses)
+- **Optax** — JAX optimiser library (Adam, learning rate schedules)
+- **PyTorch** — Used **only** for ONNX export (optional `[export]` dependency)
 
 ### Usage
 
@@ -234,14 +247,18 @@ Export: DeployablePolicy(nn.Module) = Normalizer → Policy → GravCompNet → 
 # Inside the Docker container (source workspace first)
 source /ros2_ws/install/setup.bash
 
-python -m core_rl.train --robot parol6 --task joint_tracking --algo ppo --num-envs 8
+# Train with 4096 parallel envs on GPU
+python -m core_rl.train --robot parol6 --task joint_tracking --algo ppo --num-envs 4096
 
 # With overrides
 python -m core_rl.train --robot parol6 --task joint_tracking --algo sac \
-  --num-envs 16 --total-timesteps 2000000 --config /path/to/override.yaml
+  --num-envs 8192 --total-timesteps 10000000 --config /path/to/override.yaml
 
 # Disable streaming (offline training)
 python -m core_rl.train --robot parol6 --task joint_tracking --algo ppo --no-redis --no-mlflow
+
+# Skip ONNX export
+python -m core_rl.train --robot parol6 --task joint_tracking --algo ppo --no-export
 ```
 
 ### Robot Config Resolution
@@ -253,30 +270,46 @@ src/<robot>/<robot>_description/config/rl_config.yaml
 Declares: `urdf_path`, `mesh_dir`, `gains_path`, `joint_names`, `uri_strip_patterns`.
 `robot.py` reads this, patches the URDF for MuJoCo (strips URIs, injects `fusestatic="false"`), writes a MuJoCo-loadable URDF into the mesh directory, and returns a `RobotConfig` dataclass.
 
-**Important:** Robot resolution is done **once in the parent process** and the `RobotConfig` is passed to `SubprocVecEnv` workers. This avoids race conditions where multiple subprocesses would write the same URDF file simultaneously.
-
 ### Task System
 
-Tasks define observation/action spaces, reset logic, and reward functions:
-- `BaseTask` ABC with `configure()`, `reset()`, `compute_observation()`, `compute_reward()`
-- Registry: `@register_task("name")` decorator, looked up by string
-- **`joint_tracking`**: track random target positions; obs = `[q, dq, q_target]`; reward = `-||q - q_target||² - α||dq||²`
+Tasks define observation/action sizes, reset logic, and reward functions as **Brax `PipelineEnv` subclasses**:
+- `BaseTask(PipelineEnv)` with JAX-pure `reset(rng)`, `step(state, action)`. All episode state lives in `State.info` (no mutable instance vars — required for JIT-traceability).
+- Helper methods: `_get_joint_q()`, `_get_joint_qd()`, `_get_qfrc_bias()`, `_pd_control()`.
+- Registry: `@register_task("name")` decorator, looked up by string.
+- **`joint_tracking`**: track random target positions; obs = `[q, dq, q_target]`; reward = `-||q - q_target||² - α||dq||²`. Episode state (`q_target`, `step`, `qfrc_bias`) stored in `State.info`.
 
 ### Algorithm System
 
-- `BaseAlgorithm` ABC with `train()`, `save()`, `load()`, `get_policy()`
+- `BaseAlgorithm` ABC with `train() → (MakePolicyFn, Params, Metrics)`, `save()`, `load()`, `make_inference_fn()`
 - Registry: `@register_algorithm("name")`
-- **`ppo`**, **`sac`**: thin wrappers around Stable-Baselines3
+- **`ppo`**, **`sac`**: thin wrappers around Brax's built-in training functions (`brax.training.agents.ppo.train()`, `brax.training.agents.sac.train()`)
+- Config mapping from familiar names to Brax internals (e.g. `n_steps → unroll_length`, `gamma → discounting`, `clip_range → clipping_epsilon`)
+
+### SimBackend Abstraction
+
+Protocol-based backend system for future multi-simulator support:
+- `SimBackend` Protocol: `init(model, q, qd) → State`, `step(model, state, action) → State`
+- `@register_backend("name")` decorator with `get_backend()` lookup
+- **`MJXBackend`**: wraps `brax.mjx.pipeline.init()` / `brax.mjx.pipeline.step()`
+- Future: `IsaacSimBackend`, `NewtonBackend`
 
 ### ONNX Export
 
-All computation layers baked into a single `DeployablePolicy(nn.Module)`:
-1. **ObservationNormalizer** — running mean/std from VecNormalize
-2. **Policy MLP** — extracted from SB3 (supports both PPO's `mlp_extractor` + `action_net` and SAC's `actor.latent_pi` + `actor.mu`)
-3. **GravityCompensationNet** — learned MLP `(q, dq) → qfrc_bias`
+JAX parameters are extracted and bridged to PyTorch for ONNX export:
+1. **Normalizer** — mean/std extracted from Brax's `RunningStatisticsState`
+2. **Policy MLP** — weights/biases extracted from Flax params, mapped to `nn.Linear` layers
+3. **GravityCompensationNet** — Flax `nn.Module` trained post-hoc with Optax, same extraction
 4. **PDController** — `tau = kp*(q_d - q) + kd*(0 - dq) + grav_comp`
 
-GravComp data `(q, dq, qfrc_bias)` is collected during RL rollouts via `GravCompCollectorCallback` and the network is trained supervised post-hoc.
+GravComp data `(q, dq, qfrc_bias)` is collected by running the trained policy for N steps post-training via `collect_grav_comp_data()`, then a Flax MLP is trained supervised.
+
+### Callbacks / Hooks
+
+Brax uses `progress_fn(step, metrics)` hooks instead of SB3 `BaseCallback` objects:
+- `compose_progress_fn(*hooks)` combines multiple hooks with exception isolation
+- **`MLflowHook`**: start/log/end lifecycle, artifact logging
+- **`RedisStreamHook`**: Redis Streams publishing (`rl:train:<experiment>:<run_id>:metrics`)
+- Simple print hook for console progress
 
 ### Streaming
 
@@ -288,29 +321,33 @@ GravComp data `(q, dq, qfrc_bias)` is collected during RL rollouts via `GravComp
 ```
 src/common/rl/
 ├── CMakeLists.txt, package.xml      — Uses ament_cmake_python for correct install paths
-├── config/defaults.yaml              — Default training hyperparameters
+├── config/defaults.yaml              — Default training hyperparameters (Brax param names)
 └── core_rl/
     ├── __init__.py, __main__.py      — Package init + `python -m core_rl` support
     ├── robot.py                      — Robot config resolution (name → URDF + gains + joints)
-    ├── env.py                        — MujocoRobotEnv(gymnasium.Env) + make_env() factory
-    ├── train.py                      — CLI entry point
-    ├── export_onnx.py                — ONNX export with all layers
+    ├── env.py                        — make_env() factory → BaseTask (PipelineEnv)
+    ├── train.py                      — CLI entry point (Brax training loops)
+    ├── export_onnx.py                — ONNX export: Flax → NumPy → PyTorch → ONNX
+    ├── backends/
+    │   ├── __init__.py               — SimBackend Protocol + registry
+    │   └── mjx.py                    — MJX backend (brax.mjx.pipeline)
     ├── algorithms/
     │   ├── __init__.py               — BaseAlgorithm + registry
-    │   ├── ppo.py                    — PPO (SB3 wrapper)
-    │   └── sac.py                    — SAC (SB3 wrapper)
+    │   ├── ppo.py                    — PPO (Brax wrapper)
+    │   └── sac.py                    — SAC (Brax wrapper)
     ├── tasks/
-    │   ├── __init__.py               — BaseTask + registry
-    │   └── joint_tracking.py         — Joint position tracking task
+    │   ├── __init__.py               — BaseTask(PipelineEnv) + registry
+    │   └── joint_tracking.py         — Joint position tracking task (pure JAX)
     ├── modules/
-    │   ├── gravity_comp.py           — Learned gravity compensation MLP
-    │   ├── pd_controller.py          — PD controller as nn.Module
-    │   ├── normalizer.py             — Observation normalizer
-    │   └── deployable.py             — Full deployable pipeline
+    │   ├── gravity_comp.py           — Learned gravity compensation (Flax + Optax)
+    │   ├── pd_controller.py          — PD controller (pure JAX function)
+    │   ├── normalizer.py             — Observation normalizer (pure JAX)
+    │   └── deployable.py             — Full deployable pipeline (JAX composition)
     └── callbacks/
-        ├── redis_stream.py           — Redis Streams metric publishing
-        ├── mlflow_logger.py          — MLflow experiment tracking
-        └── grav_comp_collector.py    — Collects (q, dq, bias) data
+        ├── __init__.py               — compose_progress_fn() combiner
+        ├── redis_stream.py           — Redis Streams hook
+        ├── mlflow_logger.py          — MLflow hook
+        └── grav_comp_collector.py    — Post-training (q, dq, bias) collection
 ```
 
 ---
@@ -352,5 +389,11 @@ The repo uses [pre-commit](https://pre-commit.com/) hooks configured in `.pre-co
 - **`fusestatic="false"`**: Required so MuJoCo preserves fixed-joint scene bodies as separate bodies (default behavior fuses them into the parent, making them inaccessible via `mj_name2id()`)
 - **Scene file resolution**: Bare filenames are resolved from `parol6_launch/config/`; absolute paths also accepted
 - **`ament_cmake_python`**: The RL package uses `ament_python_install_package()` so `core_rl` is installed to the correct `site-packages` directory on `PYTHONPATH` after sourcing the workspace
-- **Pre-resolved RobotConfig**: `resolve_robot()` runs once in the parent process; the `RobotConfig` object is passed to `SubprocVecEnv` workers to avoid file write race conditions
-- **SB3 policy extraction for ONNX**: `_ExtractedPolicyNet` detects whether the SB3 policy is on-policy (PPO: `mlp_extractor` + `action_net`) or off-policy (SAC: `actor.latent_pi` + `actor.mu`) and handles both
+- **Pre-resolved RobotConfig**: `resolve_robot()` runs once before training; the `RobotConfig` dataclass carries MJCF path, joint names, gains, and limits to all downstream code
+- **Brax PipelineEnv**: Tasks extend `brax.envs.PipelineEnv`, which handles MJX model loading, GPU vectorisation via `jax.vmap`, and `pipeline_step()` physics integration
+- **Pure JAX JIT-traceability**: All task `reset()` / `step()` functions, PD control, normalisation, and reward computation are pure functions operating on immutable `State` objects — required for `jax.jit` compilation across thousands of envs
+- **Episode state in State.info**: Since JIT-compiled functions can't use mutable instance variables, per-episode state (`q_target`, `step_count`, `qfrc_bias`) is carried in the `State.info` dict
+- **SimBackend Protocol**: Abstracts physics stepping behind `init()` / `step()` — currently only MJX, designed for future IsaacSim and Newton backends
+- **Post-hoc gravity comp**: GravComp data is collected by running the trained policy for N steps after training completes, then a Flax MLP is trained supervised — avoids complicating the JIT'd training loop
+- **PyTorch only for ONNX export**: JAX/Flax params are extracted to NumPy, loaded into thin PyTorch `nn.Module` wrappers, and exported via `torch.onnx.export()` — PyTorch is an optional dependency
+- **Brax progress_fn hooks**: Replace SB3's `BaseCallback` pattern; `compose_progress_fn()` combines multiple hooks with exception isolation so a Redis failure doesn't crash training

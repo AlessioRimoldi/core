@@ -1,57 +1,57 @@
-# Default training configuration.
+# Default training configuration (Brax / MJX).
 # Override any key via --config on the CLI.
 
 training:
-  total_timesteps: 1_000_000
-  num_envs: 8
+  total_timesteps: 10_000_000
+  num_envs: 4096            # Brax vectorises via jax.vmap (GPU)
   seed: 42
-  device: auto            # "auto", "cpu", or "cuda"
 
 env:
   max_episode_steps: 500
-  control_dt: 0.01        # 100 Hz control loop (matches ros2_control)
-  physics_dt: 0.001       # MuJoCo timestep
-  render: false
+  control_dt: 0.01          # 100 Hz control loop (matches ros2_control)
+  physics_dt: 0.001         # MuJoCo timestep
+  backend: mjx              # Simulation backend (mjx)
 
 algorithms:
   ppo:
+    # Brax PPO parameter names
     learning_rate: 3.0e-4
-    n_steps: 2048
-    batch_size: 64
-    n_epochs: 10
-    gamma: 0.99
+    unroll_length: 20         # Rollout steps per env per update
+    num_minibatches: 32
+    num_updates_per_batch: 4
+    discounting: 0.99
     gae_lambda: 0.95
-    clip_range: 0.2
-    ent_coef: 0.0
-    vf_coef: 0.5
+    clipping_epsilon: 0.2
+    entropy_cost: 0.0
+    vf_loss_coefficient: 0.5
     max_grad_norm: 0.5
-    policy: MlpPolicy
-    policy_kwargs:
-      net_arch: [256, 256]
+    normalize_observations: true
+    reward_scaling: 1.0
+    network_factory_kwargs:
+      hidden_layer_sizes: [256, 256]
 
   sac:
+    # Brax SAC parameter names
     learning_rate: 3.0e-4
-    buffer_size: 1_000_000
-    learning_starts: 10_000
+    max_replay_size: 1_000_000
+    min_replay_size: 10_000
     batch_size: 256
     tau: 0.005
-    gamma: 0.99
-    ent_coef: auto
-    policy: MlpPolicy
-    policy_kwargs:
-      net_arch: [256, 256]
+    discounting: 0.99
+    normalize_observations: true
+    reward_scaling: 1.0
+    network_factory_kwargs:
+      hidden_layer_sizes: [256, 256]
 
 callbacks:
   redis:
     enabled: true
     host: redis
     port: 6379
-    password: ""           # Set via REDIS_PASS env var if needed
-    publish_freq: 100      # Log to Redis every N steps
+    password: ""             # Set via REDIS_PASS env var if needed
   mlflow:
     enabled: true
     tracking_uri: "http://mlflow:5000"
-    publish_freq: 1        # Log to MLflow every N rollouts
 
 export:
   onnx: true
@@ -60,4 +60,4 @@ export:
     hidden_dims: [256, 256]
     train_epochs: 50
     train_lr: 1.0e-3
-    buffer_size: 500_000
+    buffer_size: 10_000      # Steps to collect post-training

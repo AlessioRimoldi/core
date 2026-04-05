@@ -1,50 +1,53 @@
-"""PD controller as a torch.nn.Module for ONNX export."""
+"""PD controller — pure JAX function.
+
+``tau = kp * (q_target - q) + kd * (dq_target - dq) + gravity_comp``
+
+Gains are plain JAX arrays (not learnable parameters).
+At ONNX export time, they are baked into a PyTorch ``nn.Module`` buffer.
+"""
 
 from __future__ import annotations
 
-import torch
-import torch.nn as nn
+from typing import NamedTuple
+
+import jax
+import jax.numpy as jnp
+import numpy as np
 
 
-class PDController(nn.Module):
-    """PD controller: tau = kp * (q_target - q) + kd * (dq_target - dq) + gravity_comp.
+class PDGains(NamedTuple):
+    """PD controller gains."""
 
-    Gains are stored as buffers (not parameters) so they're baked into ONNX
-    but not updated by optimizers.
+    kp: jax.Array  # (num_joints,)
+    kd: jax.Array  # (num_joints,)
+
+
+def pd_control(
+    gains: PDGains,
+    q_target: jax.Array,
+    q_current: jax.Array,
+    dq_current: jax.Array,
+    gravity_comp: jax.Array,
+    dq_target: jax.Array | None = None,
+) -> jax.Array:
+    """Compute PD + gravity compensation torques.
+
+    Args:
+        gains: ``PDGains(kp, kd)``.
+        q_target: Desired joint positions, shape ``(..., num_joints)``.
+        q_current: Current joint positions.
+        dq_current: Current joint velocities.
+        gravity_comp: Gravity compensation torques.
+        dq_target: Desired joint velocities (default: zeros).
+
+    Returns:
+        Joint torques, shape ``(..., num_joints)``.
     """
+    if dq_target is None:
+        dq_target = jnp.zeros_like(dq_current)
+    return gains.kp * (q_target - q_current) + gains.kd * (dq_target - dq_current) + gravity_comp
 
-    def __init__(self, kp: torch.Tensor, kd: torch.Tensor):
-        """
-        Args:
-            kp: Proportional gains, shape (num_joints,).
-            kd: Derivative gains, shape (num_joints,).
-        """
-        super().__init__()
-        self.register_buffer("kp", kp.float())
-        self.register_buffer("kd", kd.float())
 
-    def forward(
-        self,
-        q_target: torch.Tensor,
-        q_current: torch.Tensor,
-        dq_current: torch.Tensor,
-        gravity_comp: torch.Tensor,
-        dq_target: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Compute PD + gravity compensation torques.
-
-        Args:
-            q_target: Desired joint positions, shape (..., num_joints).
-            q_current: Current joint positions, shape (..., num_joints).
-            dq_current: Current joint velocities, shape (..., num_joints).
-            gravity_comp: Gravity compensation torques, shape (..., num_joints).
-            dq_target: Desired joint velocities (default: zeros).
-
-        Returns:
-            Joint torques, shape (..., num_joints).
-        """
-        if dq_target is None:
-            dq_target = torch.zeros_like(dq_current)
-
-        tau = self.kp * (q_target - q_current) + self.kd * (dq_target - dq_current) + gravity_comp
-        return tau
+def to_numpy(gains: PDGains) -> tuple[np.ndarray, np.ndarray]:
+    """Convert gains to NumPy for ONNX export."""
+    return np.asarray(gains.kp), np.asarray(gains.kd)

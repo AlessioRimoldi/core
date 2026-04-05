@@ -1,12 +1,30 @@
-"""Algorithm base class and registry."""
+"""Algorithm base class and registry.
+
+Wraps Brax's training functions (``brax.training.agents.ppo.train``,
+``brax.training.agents.sac.train``) behind a unified interface.
+
+Brax ``train()`` returns ``(make_policy, params, metrics)`` where:
+    - ``make_policy`` is a function ``params → (obs → action)``
+    - ``params`` is a JAX pytree ``(normalizer_params, policy_params, ...)``
+    - ``metrics`` is a dict of final eval metrics
+"""
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from typing import Any
 
-import numpy as np
-import torch
+import jax
+
+from core_rl.tasks import BaseTask
+
+# Type aliases for Brax training outputs
+Metrics = dict[str, Any]
+Params = Any  # JAX pytree
+MakePolicyFn = Callable  # params → (obs → action)
+ProgressFn = Callable[[int, Metrics], None]
+PolicyParamsFn = Callable  # (step, make_policy, params) → None
 
 _ALGORITHM_REGISTRY: dict[str, type] = {}
 
@@ -14,14 +32,14 @@ _ALGORITHM_REGISTRY: dict[str, type] = {}
 def register_algorithm(name: str):
     """Class decorator that registers an algorithm by name."""
 
-    def decorator(cls):
+    def decorator(cls: type) -> type:
         _ALGORITHM_REGISTRY[name] = cls
         return cls
 
     return decorator
 
 
-def get_algorithm(name: str, **kwargs) -> BaseAlgorithm:
+def get_algorithm(name: str, **kwargs: Any) -> BaseAlgorithm:
     """Instantiate a registered algorithm by name."""
     if name not in _ALGORITHM_REGISTRY:
         available = ", ".join(sorted(_ALGORITHM_REGISTRY.keys()))
@@ -34,40 +52,37 @@ def list_algorithms() -> list[str]:
 
 
 class BaseAlgorithm(ABC):
-    """Abstract base for RL algorithms.
+    """Abstract base for RL algorithms backed by Brax training loops.
 
-    Wraps an underlying library (e.g. Stable-Baselines3) with a unified
-    interface for training, saving/loading, and policy extraction.
+    Each subclass wraps a specific ``brax.training.agents.*.train()``
+    function, mapping config keys to the correct parameter names.
     """
 
     @abstractmethod
-    def __init__(self, env, config: dict[str, Any], callbacks: list | None = None): ...
+    def __init__(
+        self,
+        env: BaseTask,
+        config: dict[str, Any],
+        progress_fn: ProgressFn | None = None,
+        policy_params_fn: PolicyParamsFn | None = None,
+    ): ...
 
     @abstractmethod
-    def train(self, total_timesteps: int):
-        """Run training for the given number of timesteps."""
+    def train(self) -> tuple[MakePolicyFn, Params, Metrics]:
+        """Run training.  Returns ``(make_policy, params, metrics)``."""
 
     @abstractmethod
-    def save(self, path: str):
-        """Save the trained model to disk."""
+    def save(self, path: str, params: Params):
+        """Save trained params to disk."""
 
     @classmethod
     @abstractmethod
-    def load(cls, path: str, env=None) -> BaseAlgorithm:
-        """Load a trained model from disk."""
+    def load(cls, path: str) -> Params:
+        """Load trained params from disk."""
 
     @abstractmethod
-    def get_policy_network(self) -> torch.nn.Module:
-        """Extract the policy network as a PyTorch module for ONNX export."""
-
-    @abstractmethod
-    def predict(self, observation: np.ndarray, deterministic: bool = True) -> np.ndarray:
-        """Run inference on a single observation."""
-
-    @property
-    @abstractmethod
-    def logger_data(self) -> dict[str, Any]:
-        """Return latest logged training metrics."""
+    def make_inference_fn(self, params: Params) -> Callable[[jax.Array], jax.Array]:
+        """Build a deterministic inference function from params."""
 
 
 # Import concrete algorithms to trigger registration

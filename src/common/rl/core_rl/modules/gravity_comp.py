@@ -1,100 +1,112 @@
-"""Learned gravity compensation network.
+"""Learned gravity compensation network — Flax / JAX.
 
-An MLP that predicts qfrc_bias (gravity + Coriolis torques) from (q, dq).
+An MLP that predicts ``qfrc_bias`` (gravity + Coriolis torques) from ``(q, dq)``.
 Trained supervised on data collected during RL rollouts.
+
+Uses Flax ``linen`` for the network definition and Optax for optimisation.
 """
 
 from __future__ import annotations
 
+from typing import Any
+
+import flax.linen as nn
+import jax
+import jax.numpy as jnp
 import numpy as np
-import torch
-import torch.nn as nn
+import optax
 
 
-class GravityCompensationNet(nn.Module):
-    """MLP: (q, dq) -> qfrc_bias estimate."""
+class GravityCompNet(nn.Module):
+    """MLP: ``(q, dq) → qfrc_bias`` estimate."""
 
-    def __init__(self, num_joints: int, hidden_dims: list[int] | None = None):
-        super().__init__()
-        hidden_dims = hidden_dims or [256, 256]
-        self.num_joints = num_joints
+    num_joints: int
+    hidden_dims: tuple[int, ...] = (256, 256)
 
-        layers: list[nn.Module] = []
-        in_dim = 2 * num_joints  # q + dq
-        for h in hidden_dims:
-            layers.append(nn.Linear(in_dim, h))
-            layers.append(nn.ReLU())
-            in_dim = h
-        layers.append(nn.Linear(in_dim, num_joints))
-
-        self.net = nn.Sequential(*layers)
-
-    def forward(self, q: torch.Tensor, dq: torch.Tensor) -> torch.Tensor:
-        """Predict gravity compensation torques.
-
-        Args:
-            q: Joint positions, shape (..., num_joints)
-            dq: Joint velocities, shape (..., num_joints)
-
-        Returns:
-            Estimated qfrc_bias, shape (..., num_joints)
-        """
-        x = torch.cat([q, dq], dim=-1)
-        return self.net(x)
+    @nn.compact
+    def __call__(self, q: jax.Array, dq: jax.Array) -> jax.Array:
+        x = jnp.concatenate([q, dq], axis=-1)
+        for h in self.hidden_dims:
+            x = nn.Dense(h)(x)
+            x = nn.relu(x)
+        x = nn.Dense(self.num_joints)(x)
+        return x
 
 
 def train_gravity_comp(
-    model: GravityCompensationNet,
+    num_joints: int,
     q_data: np.ndarray,
     dq_data: np.ndarray,
     bias_data: np.ndarray,
+    hidden_dims: tuple[int, ...] = (256, 256),
     epochs: int = 50,
     lr: float = 1e-3,
     batch_size: int = 512,
-    device: str = "cpu",
+    seed: int = 0,
     verbose: bool = True,
-) -> dict[str, list[float]]:
-    """Train the GravCompNet on collected data.
+) -> tuple[GravityCompNet, Any, dict[str, list[float]]]:
+    """Train a GravityCompNet on collected data.
 
     Args:
-        model: The GravityCompensationNet to train.
-        q_data: Joint positions, shape (N, num_joints).
-        dq_data: Joint velocities, shape (N, num_joints).
-        bias_data: Target qfrc_bias, shape (N, num_joints).
+        num_joints: Number of robot joints.
+        q_data: Joint positions, shape ``(N, num_joints)``.
+        dq_data: Joint velocities, shape ``(N, num_joints)``.
+        bias_data: Target ``qfrc_bias``, shape ``(N, num_joints)``.
+        hidden_dims: Hidden layer sizes.
         epochs: Number of training epochs.
         lr: Learning rate.
         batch_size: Mini-batch size.
-        device: Torch device.
+        seed: Random seed.
         verbose: Print progress.
 
     Returns:
-        Training history dict with "loss" key.
+        ``(model, params, history)`` where ``params`` is a Flax pytree and
+        ``history`` is a dict with ``"loss"`` key.
     """
-    model = model.to(device)
-    model.train()
+    model = GravityCompNet(num_joints=num_joints, hidden_dims=hidden_dims)
 
-    q_t = torch.tensor(q_data, dtype=torch.float32, device=device)
-    dq_t = torch.tensor(dq_data, dtype=torch.float32, device=device)
-    bias_t = torch.tensor(bias_data, dtype=torch.float32, device=device)
+    rng = jax.random.PRNGKey(seed)
+    dummy_q = jnp.zeros((1, num_joints))
+    dummy_dq = jnp.zeros((1, num_joints))
+    params = model.init(rng, dummy_q, dummy_dq)
 
-    dataset = torch.utils.data.TensorDataset(q_t, dq_t, bias_t)
-    loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    optimizer = optax.adam(lr)
+    opt_state = optimizer.init(params)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    loss_fn = nn.MSELoss()
+    q_jax = jnp.array(q_data)
+    dq_jax = jnp.array(dq_data)
+    bias_jax = jnp.array(bias_data)
+    n_samples = len(q_data)
+
+    @jax.jit
+    def loss_fn(params, q_batch, dq_batch, bias_batch):
+        pred = model.apply(params, q_batch, dq_batch)
+        return jnp.mean((pred - bias_batch) ** 2)
+
+    @jax.jit
+    def train_step(params, opt_state, q_batch, dq_batch, bias_batch):
+        loss, grads = jax.value_and_grad(loss_fn)(params, q_batch, dq_batch, bias_batch)
+        updates, opt_state_new = optimizer.update(grads, opt_state, params)
+        params_new = optax.apply_updates(params, updates)
+        return params_new, opt_state_new, loss
 
     history: dict[str, list[float]] = {"loss": []}
 
     for epoch in range(epochs):
+        rng, rng_perm = jax.random.split(rng)
+        perm = jax.random.permutation(rng_perm, n_samples)
+
         epoch_loss = 0.0
         n_batches = 0
-        for q_batch, dq_batch, bias_batch in loader:
-            pred = model(q_batch, dq_batch)
-            loss = loss_fn(pred, bias_batch)
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            epoch_loss += loss.item()
+
+        for i in range(0, n_samples, batch_size):
+            idx = perm[i : i + batch_size]
+            q_b = q_jax[idx]
+            dq_b = dq_jax[idx]
+            bias_b = bias_jax[idx]
+
+            params, opt_state, loss = train_step(params, opt_state, q_b, dq_b, bias_b)
+            epoch_loss += float(loss)
             n_batches += 1
 
         avg_loss = epoch_loss / max(n_batches, 1)
@@ -103,5 +115,4 @@ def train_gravity_comp(
         if verbose and (epoch + 1) % 10 == 0:
             print(f"  GravComp epoch {epoch+1}/{epochs} — loss: {avg_loss:.6f}")
 
-    model.eval()
-    return history
+    return model, params, history

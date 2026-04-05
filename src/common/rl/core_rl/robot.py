@@ -46,7 +46,6 @@ class RobotConfig:
     num_joints: int = 0
     # Paths written during resolution
     mjcf_path: str = ""
-    _mj_model: object = field(default=None, repr=False)
 
     def __post_init__(self):
         self.num_joints = len(self.joint_names)
