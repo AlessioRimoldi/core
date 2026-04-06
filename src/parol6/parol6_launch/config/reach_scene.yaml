@@ -1,0 +1,22 @@
+# Scene configuration for the reach_object task.
+# A table with a target sphere the robot must reach.
+
+objects:
+  - name: table
+    type: box
+    size: [0.6, 0.4, 0.02]
+    position: [0.3, 0.0, -0.01]
+    orientation: [0.0, 0.0, 0.0]
+    color: [0.6, 0.4, 0.2, 1.0]
+    dynamic: false
+
+  - name: target
+    type: sphere
+    radius: 0.02
+    position: [0.25, 0.1, 0.1]
+    orientation: [0.0, 0.0, 0.0]
+    color: [0.9, 0.1, 0.1, 1.0]
+    dynamic: true
+    mass: 0.001
+    role: target
+    randomize_position: [0.15, 0.15, 0.1]

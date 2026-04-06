@@ -10,9 +10,13 @@ import math
 import os
 import re
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 from xml.etree import ElementTree
 
 import yaml
+
+if TYPE_CHECKING:
+    from core_rl.scene import SceneConfig
 
 
 @dataclass
@@ -46,6 +50,8 @@ class RobotConfig:
     num_joints: int = 0
     # Paths written during resolution
     mjcf_path: str = ""
+    # Optional end-effector body name (for tasks that need EE position)
+    ee_body: str | None = None
 
     def __post_init__(self):
         self.num_joints = len(self.joint_names)
@@ -99,87 +105,6 @@ def _inject_mujoco_compiler(urdf_text: str) -> str:
             closing,
             '  <mujoco><compiler fusestatic="false"/></mujoco>\n' + closing,
         )
-    return urdf_text
-
-
-def _inject_scene_objects(urdf_text: str, scene_file_path: str) -> str:
-    """Inject scene objects from YAML as URDF links/joints."""
-    with open(scene_file_path) as f:
-        scene = yaml.safe_load(f)
-
-    if not scene or "objects" not in scene:
-        return urdf_text
-
-    urdf_text = urdf_text.rstrip()
-    if urdf_text.endswith("</robot>"):
-        urdf_text = urdf_text[: -len("</robot>")]
-
-    urdf_text += '\n  <mujoco><compiler fusestatic="false"/></mujoco>\n'
-
-    for obj in scene["objects"]:
-        name = obj["name"]
-        pos = obj.get("position", [0, 0, 0])
-        rpy = obj.get("orientation", [0, 0, 0])
-        obj_type = obj["type"]
-        dynamic = obj.get("dynamic", False)
-
-        if obj_type == "box":
-            sx, sy, sz = obj["size"]
-            geom = f'<geometry><box size="{sx*2} {sy*2} {sz*2}"/></geometry>'
-        elif obj_type == "sphere":
-            r = obj["radius"]
-            geom = f'<geometry><sphere radius="{r}"/></geometry>'
-        elif obj_type == "cylinder":
-            r = obj["radius"]
-            length = obj["length"]
-            geom = f'<geometry><cylinder radius="{r}" length="{length}"/></geometry>'
-        else:
-            continue
-
-        mass = obj.get("mass", 0.1 if dynamic else 0.01)
-        if obj_type == "box":
-            sx2, sy2, sz2 = (s * 2 for s in obj["size"])
-            ixx = mass / 12.0 * (sy2**2 + sz2**2)
-            iyy = mass / 12.0 * (sx2**2 + sz2**2)
-            izz = mass / 12.0 * (sx2**2 + sy2**2)
-        elif obj_type == "sphere":
-            r = obj["radius"]
-            ixx = iyy = izz = 2.0 / 5.0 * mass * r**2
-        elif obj_type == "cylinder":
-            r, h = obj["radius"], obj["length"]
-            ixx = iyy = mass / 12.0 * (3 * r**2 + h**2)
-            izz = mass / 2.0 * r**2
-        else:
-            ixx = iyy = izz = mass * 0.001
-
-        inertial = (
-            f'<inertial><mass value="{mass}"/>'
-            f'<inertia ixx="{ixx:.6g}" ixy="0" ixz="0" iyy="{iyy:.6g}" iyz="0" izz="{izz:.6g}"/>'
-            f"</inertial>"
-        )
-        rgba = obj.get("color", [0.5, 0.5, 0.5, 1.0])
-        joint_type = "floating" if dynamic else "fixed"
-
-        urdf_text += f"""
-  <link name="{name}">
-    {inertial}
-    <visual>
-      {geom}
-      <material name="{name}_mat">
-        <color rgba="{rgba[0]} {rgba[1]} {rgba[2]} {rgba[3]}"/>
-      </material>
-    </visual>
-    <collision>
-      {geom}
-    </collision>
-  </link>
-  <joint name="{name}_joint" type="{joint_type}">
-    <parent link="world"/>
-    <child link="{name}"/>
-    <origin xyz="{pos[0]} {pos[1]} {pos[2]}" rpy="{rpy[0]} {rpy[1]} {rpy[2]}"/>
-  </joint>
-"""
-    urdf_text += "</robot>\n"
     return urdf_text
 
 
@@ -237,12 +162,14 @@ def _load_gains(gains_path: str, joint_names: list[str], section: str = "sim") -
     return gains
 
 
-def resolve_robot(robot_name: str, scene_file: str = "") -> RobotConfig:
+def resolve_robot(robot_name: str, scene: SceneConfig | None = None) -> RobotConfig:
     """Resolve a robot name into a fully-configured RobotConfig.
 
     Reads the robot's ``rl_config.yaml`` to find the URDF, mesh directory,
     joint names, gains, and produces a MuJoCo-loadable MJCF file.
     """
+    from core_rl.scene import inject_scene_urdf
+
     rl_config_path = _find_rl_config(robot_name)
     with open(rl_config_path) as f:
         rl_config = yaml.safe_load(f)
@@ -269,10 +196,8 @@ def resolve_robot(robot_name: str, scene_file: str = "") -> RobotConfig:
     urdf_text = _strip_package_uris(urdf_text, uri_patterns)
     urdf_text = _inject_mujoco_compiler(urdf_text)
 
-    if scene_file:
-        if not os.path.isabs(scene_file):
-            scene_file = _resolve(scene_file)
-        urdf_text = _inject_scene_objects(urdf_text, scene_file)
+    if scene is not None:
+        urdf_text = inject_scene_urdf(urdf_text, scene)
 
     # Write MuJoCo-loadable URDF to mesh directory
     mjcf_path = os.path.join(mesh_dir, f"_{robot_name}_rl.urdf")
@@ -285,6 +210,8 @@ def resolve_robot(robot_name: str, scene_file: str = "") -> RobotConfig:
     # Load gains
     gains = _load_gains(gains_path, joint_names)
 
+    ee_body = rl_config.get("ee_body")
+
     return RobotConfig(
         name=robot_name,
         urdf_path=urdf_path,
@@ -293,4 +220,5 @@ def resolve_robot(robot_name: str, scene_file: str = "") -> RobotConfig:
         joint_limits=joint_limits,
         gains=gains,
         mjcf_path=mjcf_path,
+        ee_body=ee_body,
     )

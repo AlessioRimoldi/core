@@ -22,3 +22,6 @@ joint_names:
 # URI patterns to strip from URDF mesh filenames (MuJoCo needs bare filenames)
 uri_strip_patterns:
   - "package://parol6/meshes/"
+
+# End-effector body name (for tasks that need EE position, e.g. reach_object)
+ee_body: L6

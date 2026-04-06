@@ -22,6 +22,7 @@ from core_rl.callbacks.mlflow_logger import MLflowHook
 from core_rl.callbacks.redis_stream import RedisStreamHook
 from core_rl.env import make_env
 from core_rl.robot import resolve_robot
+from core_rl.scene import load_scene
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -110,9 +111,12 @@ def main():
 
     # ── 1. Resolve robot ──
     print(f"Resolving robot '{args.robot}'...")
-    robot = resolve_robot(args.robot, scene_file=args.scene_file)
+    scene = load_scene(args.scene_file) if args.scene_file else None
+    robot = resolve_robot(args.robot, scene=scene)
     print(f"  Joints:     {robot.joint_names}")
     print(f"  MJCF:       {robot.mjcf_path}")
+    if scene is not None:
+        print(f"  Scene:      {len(scene.objects)} objects")
     print()
 
     # ── 2. Create environment (Brax PipelineEnv) ──
@@ -124,7 +128,7 @@ def main():
         control_dt=env_cfg["control_dt"],
         physics_dt=env_cfg["physics_dt"],
         max_episode_steps=env_cfg["max_episode_steps"],
-        scene_file=args.scene_file,
+        scene=scene,
     )
     print(f"  Observation size: {env.observation_size}")
     print(f"  Action size:      {env.action_size}")

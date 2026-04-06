@@ -24,6 +24,7 @@ from brax import base as brax_base
 from brax.io import mjcf as brax_mjcf
 
 from core_rl.robot import RobotConfig
+from core_rl.scene import SceneConfig
 
 # ---------------------------------------------------------------------------
 # Registry
@@ -135,6 +136,7 @@ class BaseTask(brax_env.PipelineEnv):
         robot: RobotConfig,
         backend: str = "mjx",
         n_frames: int = 10,
+        scene: SceneConfig | None = None,
         **kwargs: Any,
     ):
         """
@@ -142,12 +144,23 @@ class BaseTask(brax_env.PipelineEnv):
             robot: Resolved ``RobotConfig`` (MJCF path must exist).
             backend: Brax pipeline backend name (``"mjx"``).
             n_frames: Number of physics sub-steps per control step.
+            scene: Optional scene configuration for object interaction.
             **kwargs: Forwarded to ``PipelineEnv.__init__``.
         """
         self.robot = robot
+        self.scene = scene
 
         # Load MuJoCo model via MjSpec so we can add actuators (URDFs have none)
         spec = mujoco.MjSpec.from_file(robot.mjcf_path)
+
+        # Apply per-object friction overrides from scene config
+        if scene is not None:
+            for obj in scene.objects:
+                if obj.friction is not None:
+                    for body in spec.bodies:
+                        if body.name == obj.name:
+                            for geom in body.geoms:
+                                geom.friction = np.array(obj.friction[:3] + [0.0] * max(0, 3 - len(obj.friction)))
 
         # Add a direct-drive torque actuator for every controlled joint
         for jname in robot.joint_names:
@@ -203,6 +216,45 @@ class BaseTask(brax_env.PipelineEnv):
         # Keep reference to the MjModel (for gravity-comp data access in State.info)
         self._mj_model = mj_model
 
+        # -- scene body / geom / qpos index resolution -----------------------
+        self._scene_body_ids: dict[str, int] = {}
+        self._scene_geom_ids: dict[str, int] = {}
+        self._scene_qpos_slices: dict[str, tuple[int, int]] = {}
+        self._scene_nominal_qpos: dict[str, np.ndarray] = {}
+        self._ee_body_id: int = -1
+
+        if scene is not None:
+            for obj in scene.objects:
+                body_id = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_BODY, obj.name)
+                if body_id < 0:
+                    continue
+                self._scene_body_ids[obj.name] = body_id
+
+                # Resolve geom ID (first geom belonging to this body)
+                for gi in range(mj_model.ngeom):
+                    if mj_model.geom_bodyid[gi] == body_id:
+                        self._scene_geom_ids[obj.name] = gi
+                        break
+
+                # For dynamic (floating-joint) objects, resolve qpos slice
+                if obj.dynamic:
+                    jnt_name = f"{obj.name}_joint"
+                    jid = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_JOINT, jnt_name)
+                    if jid >= 0:
+                        qpos_start = mj_model.jnt_qposadr[jid]
+                        # floating joint: 3 pos + 4 quat = 7 DOF in qpos
+                        self._scene_qpos_slices[obj.name] = (qpos_start, qpos_start + 7)
+                        # Store nominal qpos (position xyz + identity quat)
+                        pos = np.array(obj.position, dtype=np.float32)
+                        quat = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)  # wxyz
+                        self._scene_nominal_qpos[obj.name] = np.concatenate([pos, quat])
+
+        # Resolve end-effector body ID
+        if robot.ee_body:
+            self._ee_body_id = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_BODY, robot.ee_body)
+            if self._ee_body_id < 0:
+                raise ValueError(f"End-effector body '{robot.ee_body}' not found in MuJoCo model")
+
     # -- helpers (JAX-traceable) ------------------------------------------
 
     def _get_joint_q(self, pipeline_state: brax_base.State) -> jax.Array:
@@ -230,6 +282,71 @@ class BaseTask(brax_env.PipelineEnv):
         """Compute PD + gravity compensation torques (mirrors C++ backend)."""
         return self._kp * (q_target - q) + self._kd * (0.0 - qd) + qfrc_bias
 
+    # -- scene helpers (JAX-traceable) ------------------------------------
+
+    def _get_body_pos(self, pipeline_state: brax_base.State, body_id: int) -> jax.Array:
+        """Get world position of a body by its MuJoCo body ID."""
+        return pipeline_state.xpos[body_id]
+
+    def _get_body_quat(self, pipeline_state: brax_base.State, body_id: int) -> jax.Array:
+        """Get world quaternion (wxyz) of a body by its MuJoCo body ID."""
+        return pipeline_state.xquat[body_id]
+
+    def _get_ee_pos(self, pipeline_state: brax_base.State) -> jax.Array:
+        """Get end-effector world position. Requires ``robot.ee_body`` to be set."""
+        return pipeline_state.xpos[self._ee_body_id]
+
+    def _randomize_scene_q(self, rng: jax.Array, q: jax.Array) -> jax.Array:
+        """Randomize floating-joint qpos for scene objects with randomization ranges.
+
+        For each dynamic scene object that has ``randomize_position`` or
+        ``randomize_orientation``, samples uniformly within ±range of the
+        nominal position/orientation and sets the corresponding qpos slots.
+        """
+        if self.scene is None:
+            return q
+
+        for obj in self.scene.objects:
+            if obj.name not in self._scene_qpos_slices:
+                continue
+            start, end = self._scene_qpos_slices[obj.name]
+            nominal = jnp.array(self._scene_nominal_qpos[obj.name])
+
+            if obj.randomize_position is not None:
+                rng, sub_key = jax.random.split(rng)
+                half_range = jnp.array(obj.randomize_position, dtype=jnp.float32)
+                pos_offset = jax.random.uniform(sub_key, shape=(3,), minval=-half_range, maxval=half_range)
+                nominal = nominal.at[:3].set(nominal[:3] + pos_offset)
+
+            if obj.randomize_orientation is not None:
+                # Randomize via small Euler angle perturbations converted to quaternion
+                rng, sub_key = jax.random.split(rng)
+                half_range = jnp.array(obj.randomize_orientation, dtype=jnp.float32)
+                rpy = jax.random.uniform(sub_key, shape=(3,), minval=-half_range, maxval=half_range)
+                # Approximate: for small angles, quat ≈ [1, rx/2, ry/2, rz/2] (normalized)
+                half_rpy = rpy / 2.0
+                quat = jnp.array([1.0, half_rpy[0], half_rpy[1], half_rpy[2]])
+                quat = quat / jnp.linalg.norm(quat)
+                nominal = nominal.at[3:7].set(quat)
+
+            q = q.at[start:end].set(nominal)
+
+        return q
+
+    def _get_contact_dist(self, pipeline_state: brax_base.State, geom_id: int) -> jax.Array:
+        """Get minimum contact distance for a scene geom (experimental).
+
+        Returns the minimum signed distance across all contact pairs
+        involving the given geom.  Negative = penetration.
+        Uses MJX pre-allocated contact arrays.
+        """
+        contact = pipeline_state.contact
+        # contact.geom is (ncon, 2), contact.dist is (ncon,)
+        involved = jnp.any(contact.geom == geom_id, axis=-1)
+        # Where not involved, set distance to a large value
+        dist = jnp.where(involved, contact.dist, jnp.float32(1e6))
+        return jnp.min(dist)
+
     # -- abstract interface -----------------------------------------------
 
     @abstractmethod
@@ -246,3 +363,4 @@ class BaseTask(brax_env.PipelineEnv):
 
 # Import concrete tasks to trigger registration
 from core_rl.tasks import joint_tracking as _  # noqa: F401, E402
+from core_rl.tasks import reach_object as _reach  # noqa: F401, E402
