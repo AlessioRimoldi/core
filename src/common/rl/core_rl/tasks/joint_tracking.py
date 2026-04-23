@@ -52,6 +52,9 @@ class JointTrackingTask(BaseTask):
         self.target_range_fraction = target_range_fraction
         self.max_episode_steps = max_episode_steps
 
+        self.mid_range = (self._q_lower + self._q_upper) / 2.0
+        self.half_range = (self._q_upper - self._q_lower) / 2.0
+
         # Pre-compute target sampling bounds (JAX arrays)
         mid = (self._q_lower + self._q_upper) / 2.0
         half = (self._q_upper - self._q_lower) / 2.0 * target_range_fraction
@@ -124,19 +127,11 @@ class JointTrackingTask(BaseTask):
         q_target_episode = state.info["q_target"]
         step_count = state.info["step"]
 
-        # Get current joint state
-        q = self._get_joint_q(pipeline_state)
-        qd = self._get_joint_qd(pipeline_state)
-        qfrc_bias = self._get_qfrc_bias(pipeline_state)
-
-        # Clip action to joint limits (policy outputs position targets)
-        action = jnp.clip(action, self._q_lower, self._q_upper)
-
-        # PD control: compute torques from position targets
-        ctrl = self._pd_control(q_target=action, q=q, qd=qd, qfrc_bias=qfrc_bias)
+        # Scale action to joint limits [-1,1] -> [q_lower,q_upper]
+        action = self.mid_range + action * self.half_range
 
         # Step physics (PipelineEnv handles n_frames sub-stepping)
-        next_pipeline_state = self.pipeline_step(pipeline_state, ctrl)
+        next_pipeline_state = self.pipeline_step_pd(pipeline_state, action)
 
         # Compute obs, reward, done
         next_q = self._get_joint_q(next_pipeline_state)
