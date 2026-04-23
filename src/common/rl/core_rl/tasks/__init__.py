@@ -376,5 +376,6 @@ class BaseTask(brax_env.PipelineEnv):
 
 
 # Import concrete tasks to trigger registration
+from core_rl.tasks import ee_tracking as _ee  # noqa: F401, E402
 from core_rl.tasks import joint_tracking as _joint_tracking  # noqa: F401, E402
 from core_rl.tasks import reach_object as _reach  # noqa: F401, E402
