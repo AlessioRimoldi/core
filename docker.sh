@@ -40,12 +40,26 @@ elif [ "$command" == "build" ]; then
     echo "======================================================================"
     docker compose -f docker-compose.yaml --profile cpu --profile gpu build
 elif [ "$command" == "build-packages" ]; then
+    # Detect which env container is running (env-cpu or env-gpu)
+    container=""
+    for candidate in env-gpu env-cpu; do
+        if docker ps --format '{{.Names}}' | grep -q "^${candidate}$"; then
+            container="$candidate"
+            break
+        fi
+    done
+    if [ -z "$container" ]; then
+        echo "Error: no env container running. Start one with './docker.sh start' or './docker.sh start -g'." >&2
+        exit 1
+    fi
+    echo "Using container: $container"
+
     if [ $# -gt 0 ]; then
         pkgs="$*"
         echo "======================================================================"
         echo "Building packages: $pkgs"
         echo "======================================================================"
-        docker exec -it env bash -c \
+        docker exec -it "$container" bash -c \
             "source /opt/ros/jazzy/setup.bash && \
              source /ros2_ws/install/setup.bash 2>/dev/null; \
              cd /ros2_ws && colcon build --symlink-install --packages-up-to $pkgs && \
@@ -54,7 +68,7 @@ elif [ "$command" == "build-packages" ]; then
         echo "======================================================================"
         echo "Building all packages"
         echo "======================================================================"
-        docker exec -it env bash -c \
+        docker exec -it "$container" bash -c \
             "source /opt/ros/jazzy/setup.bash && \
              source /ros2_ws/install/setup.bash 2>/dev/null; \
              cd /ros2_ws && colcon build --symlink-install && \
