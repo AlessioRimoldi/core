@@ -5,3 +5,8 @@ __pycache__
 .TXT
 .vscode
 .venv
+/build
+/src/build
+/src/install
+/src/log
+/src/UNKNOWN.egg-info
