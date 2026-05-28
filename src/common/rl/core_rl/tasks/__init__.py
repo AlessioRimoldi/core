@@ -282,6 +282,20 @@ class BaseTask(brax_env.PipelineEnv):
         """Compute PD + gravity compensation torques (mirrors C++ backend)."""
         return self._kp * (q_target - q) + self._kd * (0.0 - qd) + qfrc_bias
 
+    def pipeline_step_pd(self, pipeline_state: brax_base.State, q_target: jax.Array) -> brax_base.State:
+
+        def f(state, _):
+            q = state.q[self._joint_q_indices]
+            qd = state.qd[self._joint_dof_indices]
+            qfrc_bias = state.qfrc_bias[self._joint_dof_indices]
+            action = self._kp * (q_target - q) + self._kd * (0.0 - qd) + qfrc_bias
+            return (
+                self._pipeline.step(self.sys, state, action, self._debug),
+                None,
+            )
+
+        return jax.lax.scan(f, pipeline_state, (), self._n_frames)[0]
+
     # -- scene helpers (JAX-traceable) ------------------------------------
 
     def _get_body_pos(self, pipeline_state: brax_base.State, body_id: int) -> jax.Array:
@@ -362,5 +376,5 @@ class BaseTask(brax_env.PipelineEnv):
 
 
 # Import concrete tasks to trigger registration
-from core_rl.tasks import joint_tracking as _  # noqa: F401, E402
+from core_rl.tasks import joint_tracking as _joint_tracking  # noqa: F401, E402
 from core_rl.tasks import reach_object as _reach  # noqa: F401, E402
