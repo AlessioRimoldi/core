@@ -75,6 +75,9 @@ def main():
     parser.add_argument("--no-export", action="store_true", help="Skip ONNX export")
     parser.add_argument("--num-evals", type=int, default=20, help="Number of eval points during training")
     parser.add_argument("--backend", type=str, default="mjx", help="Simulation backend (mjx)")
+    parser.add_argument(
+        "--save-checkpoints", action="store_true", help="Save Brax checkpoints to <output-dir>/checkpoints/"
+    )
     parser.add_argument("--record-video", action="store_true", help="Record tiled eval rollout videos")
     parser.add_argument("--video-interval", type=int, default=5, help="Record video every N policy updates")
     parser.add_argument(
@@ -224,6 +227,10 @@ def main():
     algo_cfg["total_timesteps"] = total_timesteps
     algo_cfg["num_evals"] = args.num_evals
     algo_cfg["max_episode_steps"] = env_cfg["max_episode_steps"]
+
+    if args.save_checkpoints:
+        algo_cfg["save_checkpoint_path"] = os.path.join(output_dir, "checkpoints")
+        print(f"  Checkpoints:      {algo_cfg['save_checkpoint_path']}")
 
     print(f"Initializing {algo_name.upper()}...")
     algorithm = get_algorithm(
