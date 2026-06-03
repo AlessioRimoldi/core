@@ -1,0 +1,231 @@
+# DADS hyperparameter sweep manifest (consumed by core_rl.multi_train).
+#
+# Base config = dads.yaml. Each run is ONE-FACTOR-AT-A-TIME around that
+# baseline (a few combos are deliberate and noted). multi_train deep-merges each
+# run's `config_overrides` onto dads.yaml, so anything not listed keeps the
+# dads.yaml value.
+#
+# Run all:
+#   python -m core_rl.multi_train --manifest /ros2_ws/core/src/common/rl/config/dads_sweep.yaml
+# Subset (recommended — pick a group at a time):
+#   python -m core_rl.multi_train --manifest ... --only baseline entropy_0p01 skill_size_5
+# Dry-run (write merged configs, don't launch):
+#   python -m core_rl.multi_train --manifest ... --dry-run
+#
+# CONSTRAINT (do not violate): on-policy q_φ requires
+#   skill_dyn_train_steps × batch_size ≤ num_envs   (here 8 × 256 = 2048 = num_envs)
+# So num_envs stays 2048; runs that raise one of those two must lower the other
+# (see batch_512_steps4) or switch to off-policy q_φ (see qphi_off_policy).
+
+defaults:
+  robot: parol6
+  task: skill_conditioned
+  algo: dads
+  num_envs: 2048              # MUST match dads.yaml (CLI flag overrides the config)
+  total_timesteps: 10_000_000
+  experiment: dads_sweep
+  num_evals: 20
+  seed: 42
+  record_video: true
+  video_interval: 5
+  video_envs: 16
+  save_checkpoints: false
+  backend: mjx
+  # Deep-merged onto defaults.yaml, then each run's overrides on top.
+  base_config: /ros2_ws/core/src/common/rl/config/dads.yaml
+
+runs:
+  # ════════════════════════════════════════════════════════════════════════
+  # Baseline (dads.yaml unchanged)
+  # ════════════════════════════════════════════════════════════════════════
+  - name: baseline
+    config_overrides: {}
+
+  # ════════════════════════════════════════════════════════════════════════
+  # Exploration / entropy / reward scale  (highest leverage for skill quality)
+  # Effective temperature = entropy_coef / reward_scaling. Lower = sharper,
+  # more distinguishable skills; too high = skills blur together.
+  # ════════════════════════════════════════════════════════════════════════
+  - name: entropy_0p01
+    config_overrides:
+      algorithms: {dads: {entropy_coef: 0.01}}
+  - name: entropy_0p03
+    config_overrides:
+      algorithms: {dads: {entropy_coef: 0.03}}
+  - name: entropy_0p05
+    config_overrides:
+      algorithms: {dads: {entropy_coef: 0.05}}
+  - name: entropy_0p2
+    config_overrides:
+      algorithms: {dads: {entropy_coef: 0.2}}
+  # Reward-scale lever with α fixed: effective temp = 0.1/10 = 0.01 (same target
+  # as entropy_0p01 but rescales the critic — see if optimization differs).
+  - name: reward_scaling_10
+    config_overrides:
+      algorithms: {dads: {reward_scaling: 10.0}}
+  # Paper-faithful: auto-tuned α (entropy_coef null) + reward_scaling 10.
+  - name: entropy_auto_rs10
+    config_overrides:
+      algorithms:
+        dads:
+          entropy_coef: null
+          reward_scaling: 10.0
+
+  # ════════════════════════════════════════════════════════════════════════
+  # Skill space dimensionality  (skill_size auto-syncs to the env via train.py)
+  # ════════════════════════════════════════════════════════════════════════
+  - name: skill_size_2
+    config_overrides:
+      algorithms: {dads: {skill_size: 2}}
+  - name: skill_size_5
+    config_overrides:
+      algorithms: {dads: {skill_size: 5}}
+
+  # ════════════════════════════════════════════════════════════════════════
+  # q_φ dynamics model: capacity, adaptation, likelihood sharpness, data mode
+  # ════════════════════════════════════════════════════════════════════════
+  - name: mog_1                       # single Gaussian (baseline run showed MoG collapse → likely matches base)
+    config_overrides:
+      algorithms: {dads: {num_mixture_components: 1}}
+  - name: mog_2
+    config_overrides:
+      algorithms: {dads: {num_mixture_components: 2}}
+  - name: qphi_lr_1e3                  # faster q_φ (alternative to more steps)
+    config_overrides:
+      algorithms: {dads: {skill_dyn_lr: 1.0e-3}}
+  - name: qphi_lr_1e4                  # slower q_φ
+    config_overrides:
+      algorithms: {dads: {skill_dyn_lr: 1.0e-4}}
+  - name: qphi_steps_4                 # slower-adapting reward model
+    config_overrides:
+      algorithms: {dads: {skill_dyn_train_steps: 4}}
+  # Larger fixed_std softens the Gaussian (fewer logp blow-ups, less discrim);
+  # smaller sharpens it. Targets are normalized so 1.0 is the natural centre.
+  - name: qphi_std_2p0
+    config_overrides:
+      algorithms: {dads: {fixed_std: 2.0}}
+  - name: qphi_std_0p5
+    config_overrides:
+      algorithms: {dads: {fixed_std: 0.5}}
+  - name: qphi_net_1024               # bigger q_φ (reward model capacity)
+    config_overrides:
+      algorithms: {dads: {skill_dyn_hidden_layer_sizes: [1024, 1024]}}
+  - name: qphi_net_256                # smaller q_φ
+    config_overrides:
+      algorithms: {dads: {skill_dyn_hidden_layer_sizes: [256, 256]}}
+  # Off-policy q_φ: trains on the replay buffer with IS correction instead of
+  # the fresh on-policy batch (8 ≤ grad_updates_per_step=64, so it's legal).
+  - name: qphi_off_policy
+    config_overrides:
+      algorithms: {dads: {train_skill_dynamics_on_policy: false}}
+
+  # ════════════════════════════════════════════════════════════════════════
+  # q_φ conditioning input  (what state q_φ sees; target stays ee_pos [12,13,14])
+  # ════════════════════════════════════════════════════════════════════════
+  - name: s_input_ee_only             # [ee_pos] only — drop q, dq
+    config_overrides:
+      env:
+        task_kwargs:
+          skill_conditioned:
+            input_obs_indices: [12, 13, 14]
+            target_obs_indices: [12, 13, 14]
+  - name: s_input_q_dq                 # [q, dq] only — drop ee (closest to vanilla DADS)
+    config_overrides:
+      env:
+        task_kwargs:
+          skill_conditioned:
+            input_obs_indices: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+            target_obs_indices: [12, 13, 14]
+
+  # ════════════════════════════════════════════════════════════════════════
+  # DADS reward estimator: L (prior_samples) — MC samples in the r_z denominator
+  # ════════════════════════════════════════════════════════════════════════
+  - name: prior_samples_50
+    config_overrides:
+      algorithms: {dads: {prior_samples: 50}}
+  - name: prior_samples_300
+    config_overrides:
+      algorithms: {dads: {prior_samples: 300}}
+  - name: prior_samples_500
+    config_overrides:
+      algorithms: {dads: {prior_samples: 500}}
+
+  # ════════════════════════════════════════════════════════════════════════
+  # SAC optimization: update intensity, learning rate, target update, batch
+  # ════════════════════════════════════════════════════════════════════════
+  - name: utd_32                       # fewer SAC updates per step (more stable)
+    config_overrides:
+      algorithms: {dads: {grad_updates_per_step: 32}}
+  - name: utd_128                      # more SAC updates (faster, riskier)
+    config_overrides:
+      algorithms: {dads: {grad_updates_per_step: 128}}
+  - name: sac_lr_1e4
+    config_overrides:
+      algorithms: {dads: {learning_rate: 1.0e-4}}
+  - name: sac_lr_5e4
+    config_overrides:
+      algorithms: {dads: {learning_rate: 5.0e-4}}
+  - name: tau_0p01                     # faster target-critic tracking
+    config_overrides:
+      algorithms: {dads: {tau: 0.01}}
+  # Larger SAC batch; drop q_φ steps to keep 4×512 = 2048 ≤ num_envs.
+  - name: batch_512_steps4
+    config_overrides:
+      algorithms: {dads: {batch_size: 512, skill_dyn_train_steps: 4}}
+
+  # ════════════════════════════════════════════════════════════════════════
+  # Replay buffer / data freshness
+  # ════════════════════════════════════════════════════════════════════════
+  - name: buffer_50k                   # fresher / more on-policy
+    config_overrides:
+      algorithms: {dads: {max_replay_size: 50_000}}
+  - name: buffer_1000k                 # staler / more off-policy
+    config_overrides:
+      algorithms: {dads: {max_replay_size: 1_000_000}}
+
+  # ════════════════════════════════════════════════════════════════════════
+  # Horizon: discount + episode length (how long a skill runs)
+  # ════════════════════════════════════════════════════════════════════════
+  - name: gamma_0p95
+    config_overrides:
+      algorithms: {dads: {discounting: 0.95}}
+  - name: gamma_0p999
+    config_overrides:
+      algorithms: {dads: {discounting: 0.999}}
+  - name: max_episode_steps_100
+    config_overrides:
+      env: {max_episode_steps: 100}
+  - name: max_episode_steps_300
+    config_overrides:
+      env: {max_episode_steps: 300}
+
+  # ════════════════════════════════════════════════════════════════════════
+  # Environment: initial-pose noise (skill robustness / state coverage)
+  # ════════════════════════════════════════════════════════════════════════
+  - name: init_noise_0                 # strictly fixed start
+    config_overrides:
+      env: {task_kwargs: {skill_conditioned: {init_noise: 0.0}}}
+  - name: init_noise_0p5
+    config_overrides:
+      env: {task_kwargs: {skill_conditioned: {init_noise: 0.5}}}
+
+  # ════════════════════════════════════════════════════════════════════════
+  # Policy/critic network capacity
+  # ════════════════════════════════════════════════════════════════════════
+  - name: net_256
+    config_overrides:
+      algorithms: {dads: {network_factory_kwargs: {hidden_layer_sizes: [256, 256]}}}
+  - name: net_1024
+    config_overrides:
+      algorithms: {dads: {network_factory_kwargs: {hidden_layer_sizes: [1024, 1024]}}}
+
+  # ════════════════════════════════════════════════════════════════════════
+  # Robustness: re-run the baseline under different seeds (estimates run-to-run
+  # variance so you know which sweep deltas are real vs noise).
+  # ════════════════════════════════════════════════════════════════════════
+  - name: seed_1
+    seed: 1
+    config_overrides: {}
+  - name: seed_2
+    seed: 2
+    config_overrides: {}
