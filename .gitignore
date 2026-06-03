@@ -1,7 +1,14 @@
 # Docker volume
 /docker/data
-__pycache__
+# Python bytecode cache
+__pycache__/
+*.py[cod]
 .txt
 .TXT
 .vscode
 .venv
+/build
+/src/build
+/src/install
+/src/log
+/src/UNKNOWN.egg-info

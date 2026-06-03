@@ -103,7 +103,6 @@ class SACAlgorithm(BaseAlgorithm):
             num_evals=num_evals,
             episode_length=episode_length,
             progress_fn=self._progress_fn,
-            policy_params_fn=self._policy_params_fn,
             **brax_cfg,
         )
 
