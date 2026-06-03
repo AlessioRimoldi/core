@@ -16,10 +16,24 @@ Usage::
 
 from __future__ import annotations
 
+import os
 import time
 from typing import Any
 
 import mlflow
+
+
+def _flatten(d: dict[str, Any], prefix: str = "") -> dict[str, str]:
+    """Flatten nested dict for mlflow.log_params (dot-joined keys, str values)."""
+    out: dict[str, str] = {}
+    for k, v in d.items():
+        key = f"{prefix}.{k}" if prefix else str(k)
+        if isinstance(v, dict):
+            out.update(_flatten(v, key))
+        else:
+            s = str(v)
+            out[key] = s[:497] + "..." if len(s) > 500 else s
+    return out
 
 
 class MLflowHook:
@@ -40,21 +54,38 @@ class MLflowHook:
         self._start_time = 0.0
 
     def start(self, run_name: str = "", params: dict[str, Any] | None = None):
-        """Begin an MLflow run and log hyperparameters."""
+        """Begin an MLflow run and log hyperparameters.
+
+        If `MLFLOW_SWEEP_RUN_NAME` is set in the environment, it overrides
+        the `run_name` argument — used by multi_train.py so each child run
+        gets the manifest's `name:` instead of an auto-generated timestamp.
+
+        If `MLFLOW_PARENT_RUN_ID` is set, the new run is nested under that
+        parent — used by multi_train.py to group a whole sweep into one
+        collapsible block in the MLflow UI.
+        """
         mlflow.set_tracking_uri(self.tracking_uri)
         mlflow.set_experiment(self.experiment_name)
-        self._run = mlflow.start_run(run_name=run_name or f"run_{int(time.time())}")
+
+        sweep_run_name = os.environ.get("MLFLOW_SWEEP_RUN_NAME", "").strip()
+        effective_run_name = sweep_run_name or run_name or f"run_{int(time.time())}"
+
+        parent_run_id = os.environ.get("MLFLOW_PARENT_RUN_ID", "").strip()
+        tags: dict[str, str] = {}
+        if parent_run_id:
+            tags["mlflow.parentRunId"] = parent_run_id
+        if sweep_run_name:
+            tags["sweep_run_name"] = sweep_run_name
+
+        self._run = mlflow.start_run(run_name=effective_run_name, tags=tags or None)
         self._start_time = time.time()
 
         if params:
-            flat_params = {}
-            for k, v in params.items():
-                if isinstance(v, dict):
-                    for kk, vv in v.items():
-                        flat_params[f"{k}.{kk}"] = str(vv)
-                else:
-                    flat_params[k] = str(v)
-            mlflow.log_params(flat_params)
+            flat_params = _flatten(params)
+            # MLflow caps params at 100 per log_params call and 500 chars per value.
+            items = list(flat_params.items())
+            for i in range(0, len(items), 100):
+                mlflow.log_params(dict(items[i : i + 100]))
 
     def __call__(self, step: int, metrics: dict[str, Any]) -> None:
         """Log metrics at each Brax eval boundary."""
