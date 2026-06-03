@@ -26,7 +26,8 @@ MakePolicyFn = Callable  # params → (obs → action)
 ProgressFn = Callable[[int, Metrics], None]
 PolicyParamsFn = Callable  # (step, make_policy, params) → None
 
-_ALGORITHM_REGISTRY: dict[str, type] = {}
+# Survive Jupyter / autoreload re-imports — see tasks/__init__.py for rationale.
+_ALGORITHM_REGISTRY: dict[str, type] = globals().get("_ALGORITHM_REGISTRY", {})
 
 
 def register_algorithm(name: str):
@@ -88,3 +89,4 @@ class BaseAlgorithm(ABC):
 # Import concrete algorithms to trigger registration
 from core_rl.algorithms import ppo as _  # noqa: F401, E402
 from core_rl.algorithms import sac as _sac  # noqa: F401, E402
+from core_rl.dads import dads as _dads  # noqa: F401, E402

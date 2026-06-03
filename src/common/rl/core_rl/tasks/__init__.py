@@ -30,7 +30,13 @@ from core_rl.scene import SceneConfig
 # Registry
 # ---------------------------------------------------------------------------
 
-_TASK_REGISTRY: dict[str, type] = {}
+# IMPORTANT: keep the dict object stable across module reloads.
+# If Jupyter (or autoreload) re-executes this module, a fresh `{}` would
+# discard every registration ever made — and Python won't re-run the
+# `@register_task` decorators in already-imported task modules. By
+# preserving the existing dict via `globals().get(...)`, the registry
+# survives reloads transparently.
+_TASK_REGISTRY: dict[str, type] = globals().get("_TASK_REGISTRY", {})
 
 
 def register_task(name: str):
@@ -376,5 +382,7 @@ class BaseTask(brax_env.PipelineEnv):
 
 
 # Import concrete tasks to trigger registration
+from core_rl.dads import skill_conditioned as _skill  # noqa: F401, E402
+from core_rl.tasks import ee_tracking as _ee  # noqa: F401, E402
 from core_rl.tasks import joint_tracking as _joint_tracking  # noqa: F401, E402
 from core_rl.tasks import reach_object as _reach  # noqa: F401, E402

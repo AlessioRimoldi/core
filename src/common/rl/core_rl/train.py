@@ -16,13 +16,17 @@ import time
 import tqdm
 import yaml
 
-from core_rl.algorithms import get_algorithm
-from core_rl.callbacks import ProgressFn, compose_progress_fn
-from core_rl.callbacks.mlflow_logger import MLflowHook
-from core_rl.callbacks.redis_stream import RedisStreamHook
-from core_rl.env import make_env
-from core_rl.robot import resolve_robot
-from core_rl.scene import load_scene
+# Suppress TensorFlow C++ logging. Must be set before importing core_rl, which
+# pulls in jax/brax/tensorflow (they read this env var at import time).
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+
+from core_rl.algorithms import get_algorithm  # noqa: E402
+from core_rl.callbacks import ProgressFn, compose_progress_fn  # noqa: E402
+from core_rl.callbacks.mlflow_logger import MLflowHook  # noqa: E402
+from core_rl.callbacks.redis_stream import RedisStreamHook  # noqa: E402
+from core_rl.env import make_env  # noqa: E402
+from core_rl.robot import resolve_robot  # noqa: E402
+from core_rl.scene import load_scene  # noqa: E402
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -75,6 +79,9 @@ def main():
     parser.add_argument("--no-export", action="store_true", help="Skip ONNX export")
     parser.add_argument("--num-evals", type=int, default=20, help="Number of eval points during training")
     parser.add_argument("--backend", type=str, default="mjx", help="Simulation backend (mjx)")
+    parser.add_argument(
+        "--save-checkpoints", action="store_true", help="Save Brax checkpoints to <output-dir>/checkpoints/"
+    )
     parser.add_argument("--record-video", action="store_true", help="Record tiled eval rollout videos")
     parser.add_argument("--video-interval", type=int, default=5, help="Record video every N policy updates")
     parser.add_argument(
@@ -120,7 +127,35 @@ def main():
     print()
 
     # ── 2. Create environment (Brax PipelineEnv) ──
+    # Per-task kwargs come from `env.task_kwargs[<task_name>]` in the YAML.
+    # E.g. for skill_conditioned this lets you set `base_task` and
+    # `input_obs_indices` / `target_obs_indices` without editing Python.
+    all_task_kwargs = env_cfg.get("task_kwargs") or {}
+    task_kwargs = dict(all_task_kwargs.get(args.task, {}) or {})
+
+    # ── DADS skill_size auto-sync ──
+    # The env (SkillConditionedTask) and DADS trainer each have their own
+    # `skill_size` setting. If they desync, the policy and q_φ are built
+    # for one size while the env samples z of another size — silent garbage.
+    # Auto-sync from the algo config when DADS + skill_conditioned, and
+    # error out if the user set both to inconsistent values.
+    if args.algo == "dads" and args.task == "skill_conditioned":
+        algo_skill_size = config["algorithms"].get("dads", {}).get("skill_size")
+        env_skill_size = task_kwargs.get("skill_size")
+        if algo_skill_size is not None:
+            if env_skill_size is not None and int(env_skill_size) != int(algo_skill_size):
+                raise SystemExit(
+                    f"skill_size mismatch: algorithms.dads.skill_size={algo_skill_size} "
+                    f"vs env.task_kwargs.skill_conditioned.skill_size={env_skill_size}. "
+                    "Set them equal, or remove one to let auto-sync handle it."
+                )
+            if env_skill_size is None:
+                task_kwargs["skill_size"] = int(algo_skill_size)
+                print(f"  Auto-synced env.task_kwargs.skill_conditioned.skill_size = {algo_skill_size}")
+
     print(f"Creating Brax environment ({args.backend} backend, {num_envs} vectorised envs)...")
+    if task_kwargs:
+        print(f"  Task kwargs:      {task_kwargs}")
     env = make_env(
         robot=robot,
         task_name=args.task,
@@ -129,6 +164,7 @@ def main():
         physics_dt=env_cfg["physics_dt"],
         max_episode_steps=env_cfg["max_episode_steps"],
         scene=scene,
+        task_kwargs=task_kwargs,
     )
     print(f"  Observation size: {env.observation_size}")
     print(f"  Action size:      {env.action_size}")
@@ -160,19 +196,24 @@ def main():
             tracking_uri=mlflow_cfg["tracking_uri"],
             experiment_name=args.experiment,
         )
+        env_params = {k: v for k, v in env_cfg.items() if k != "task_kwargs"}
         mlflow_hook.start(
             run_name=run_id,
             params={
-                "robot": args.robot,
-                "task": args.task,
-                "algo": args.algo,
-                "num_envs": num_envs,
-                "total_timesteps": total_timesteps,
-                "seed": seed,
-                "backend": args.backend,
-                "control_dt": env_cfg["control_dt"],
-                "physics_dt": env_cfg["physics_dt"],
-                "max_episode_steps": env_cfg["max_episode_steps"],
+                "run": {
+                    "robot": args.robot,
+                    "task": args.task,
+                    "algo": args.algo,
+                    "num_envs": num_envs,
+                    "total_timesteps": total_timesteps,
+                    "seed": seed,
+                    "backend": args.backend,
+                    "experiment": args.experiment,
+                    "scene_file": args.scene_file or "",
+                },
+                "env": env_params,
+                "task_kwargs": task_kwargs,
+                "algo": config["algorithms"].get(args.algo, {}),
             },
         )
         hooks.append(mlflow_hook)
@@ -183,10 +224,17 @@ def main():
         pbar = tqdm.tqdm(total=total, unit="step", desc="Training", dynamic_ncols=True)
 
         def _hook(step: int, metrics: dict) -> None:
-            reward = metrics.get("eval/episode_reward", metrics.get("eval/episode_reward_mean", "?"))
             sps = metrics.get("training/sps", "?")
             sps_str = f"{sps:.0f}" if isinstance(sps, int | float) else str(sps)
-            pbar.set_postfix_str(f"reward={reward} SPS={sps_str}", refresh=False)
+            # For DADS the env reward is always 0; surface r_dads instead.
+            if "training/r_dads_mean" in metrics:
+                r = metrics["training/r_dads_mean"]
+                rn = metrics.get("training/r_dads_normalized", "?")
+                rn_str = f"{rn:.2f}" if isinstance(rn, int | float) else str(rn)
+                pbar.set_postfix_str(f"r_dads={r:.3f} (norm {rn_str}) SPS={sps_str}", refresh=False)
+            else:
+                reward = metrics.get("eval/episode_reward", metrics.get("eval/episode_reward_mean", "?"))
+                pbar.set_postfix_str(f"reward={reward} SPS={sps_str}", refresh=False)
             pbar.n = min(step, total)
             pbar.refresh()
 
@@ -224,6 +272,10 @@ def main():
     algo_cfg["total_timesteps"] = total_timesteps
     algo_cfg["num_evals"] = args.num_evals
     algo_cfg["max_episode_steps"] = env_cfg["max_episode_steps"]
+
+    if args.save_checkpoints:
+        algo_cfg["save_checkpoint_path"] = os.path.join(output_dir, "checkpoints")
+        print(f"  Checkpoints:      {algo_cfg['save_checkpoint_path']}")
 
     print(f"Initializing {algo_name.upper()}...")
     algorithm = get_algorithm(

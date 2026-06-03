@@ -1,0 +1,73 @@
+# Default training configuration (Brax / MJX).
+# Override any key via --config on the CLI.
+
+training:
+  total_timesteps: 10_000_000
+  num_envs: 2048            # Brax vectorises via jax.vmap (GPU)
+  seed: 42
+
+env:
+  max_episode_steps: 200
+  control_dt: 0.01          # 100 Hz control loop (matches ros2_control)
+  physics_dt: 0.001         # MuJoCo timestep
+  backend: mjx              # Simulation backend (mjx)
+  # Per-task kwargs forwarded to the task constructor via make_env.
+  # Keyed by the registered task name (matches --task on the CLI).
+  task_kwargs:
+    skill_conditioned:
+      base_task: ee_tracking
+      # s for q_phi = [q, dq, P_ee] compare to the ANT env P_ee is important
+      # because the robot arm is fixed and p_ee is bounded by the joint limits
+      input_obs_indices:  [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14]
+
+      # We want that the skills differentiate allong the P_ee
+      target_obs_indices: [12,13,14]
+      # DADS needs (near-)fixed init so the policy doesn't burn its
+      # episode budget stabilising from a random start. Defaults to the
+      # joint mid-range with ±0.05 rad noise.
+      #   init_pose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]   # override here if needed
+      init_noise: 0.1
+
+algorithms:
+  dads:
+    # ─ SAC base (mapped to Brax SAC parameter names by _map_config) ─
+    learning_rate: 3.0e-4
+    max_replay_size: 100_000      # small ⇒ near-on-policy, like the paper
+    min_replay_size: 40_000
+    batch_size: 256
+    grad_updates_per_step: 64
+    tau: 0.005
+    discounting: 0.99
+    normalize_observations: true
+    reward_scaling: 1.0          # IMPPORTANT PARAMETER
+    num_eval_envs: 64            # keep small — eval JIT-graph = num_eval_envs × episode_length
+    network_factory_kwargs:
+      hidden_layer_sizes: [512, 512]
+
+    # ─ DADS-specific (consumed by dads.py, NOT passed through to Brax SAC) ─
+    skill_size: 3     # Equal to the degrees of freedom
+    skill_dyn_hidden_layer_sizes: [512, 512]
+    num_mixture_components: 4
+    skill_dyn_lr: 3.0e-4
+    skill_dyn_train_steps: 8     # nb of q_φ step per sgd_step
+    prior_samples: 100           # L — MC samples for the denominator of r_z
+    fixed_std: 1.0
+    # Comment this out to fall back to Brax's auto-tuned alpha.
+    entropy_coef: 0.1
+    train_skill_dynamics_on_policy: true
+    # IS clip range α (paper: is_clip_eps = 10). Only consumed when
+    # train_skill_dynamics_on_policy = false.
+    is_clip_eps: 10.0
+
+callbacks:
+  redis:
+    enabled: true
+    host: redis
+    port: 6379
+    password: ""             # Set via REDIS_PASS env var if needed
+  mlflow:
+    enabled: true
+    tracking_uri: "http://mlflow:5000"
+
+export:
+  onnx: true
