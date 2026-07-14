@@ -1,0 +1,40 @@
+# FetchPush scene: a table with a small block (the "object") to push around.
+# The task (core_rl/tasks/fetchpush.py) is now GOAL-FREE — there is no goal
+# object; the arm just explores by pushing the block over the table.
+#
+# Layout (top-down, +x forward from robot base, +y left):
+#
+#                          ┌──────────────────┐
+#      ·          arm  →   │     ▣ block      │   table surface, ENTIRELY IN
+#    (base, x=0)           │                  │   FRONT of the arm (top z=+0.01)
+#                          └──────────────────┘
+#                        x=0.10            x=0.50
+#                              y ∈ [-0.36, +0.36]
+#
+# The table is in front of the arm base (near edge x=0.10), not under it, so the
+# arm no longer rests on / is embedded in the table. The block starts on the
+# table at (0.25, 0.0, 0.03) — in front, within reach — with ±3 cm jitter.
+
+# Light-blue render background (skybox) so the block/arm stand out in eval
+# videos. RGB in 0–1; cosmetic only (rendering — not physics/obs/policy).
+background: [0.7, 0.85, 1.0]
+
+objects:
+  - name: table
+    type: box
+    size: [0.20, 0.36, 0.02]          # half-extents → x∈[0.10,0.50], y∈[-0.36,0.36], top z=+0.01
+    position: [0.30, 0.0, -0.01]      # IN FRONT of the arm base (near edge x=0.10), not under it
+    orientation: [0.0, 0.0, 0.0]
+    color: [0.6, 0.4, 0.2, 1.0]
+    dynamic: false
+
+  - name: block
+    type: box
+    size: [0.02, 0.02, 0.02]          # 4 × 4 × 4 cm cube
+    position: [0.25, 0.0, 0.03]       # in front of arm, within reach; on table top (z = 0.01 + 0.02)
+    orientation: [0.0, 0.0, 0.0]
+    color: [0.2, 0.3, 0.9, 1.0]       # blue
+    dynamic: true
+    mass: 0.1
+    role: target                       # FetchPushTask queries by role="target"
+    randomize_position: [0.03, 0.03, 0.0]   # ±3 cm jitter on start

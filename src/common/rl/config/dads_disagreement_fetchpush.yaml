@@ -1,0 +1,101 @@
+# Disagreement-fuelled skill discovery (DADS + β·disagreement) on FETCHPUSH.
+#
+# PAROL6 pushing a block around a table, GOAL-FREE. The skills are discovered by
+# DADS but aimed at the unexplored region by the ensemble-disagreement bonus:
+#     r = r_dads(s, z, Δ)  +  β · d̂(s, a)
+# The skill-dynamics q_φ predicts the change in the BLOCK's table position
+# (x, y), so DADS rewards skills for producing DISTINGUISHABLE block
+# displacements — i.e. skills differentiate along the cube (x, y) on the table.
+# The disagreement term drives the arm to actually contact + push the block
+# (fetchpush is hard-exploration: the block only moves under a committed push),
+# and the MI term spreads the resulting pushes across distinguishable skills.
+#
+#   python -m core_rl.train --robot parol6 --task skill_conditioned \
+#     --algo dads_disagreement \
+#     --config /ros2_ws/core/src/common/rl/config/dads_disagreement_fetchpush.yaml \
+#     --scene-file /ros2_ws/core/src/parol6/parol6_launch/config/fetchpush_scene.yaml
+#
+# fetchpush REQUIRES --scene-file (it queries the scene for role=target = the
+# block); without it the task raises at construction.
+
+training:
+  total_timesteps: 10_000_000
+  num_envs: 4096            # ≥ skill_dyn_train_steps × batch_size (on-policy q_φ guard)
+  seed: 42
+
+env:
+  max_episode_steps: 200
+  control_dt: 0.01           # 100 Hz control loop
+  physics_dt: 0.001          # → n_frames = 10
+  backend: mjx
+  task_kwargs:
+    # The trained task is the skill_conditioned WRAPPER over fetchpush. Keys
+    # other than base_task / skill_size / *_obs_indices are forwarded to the
+    # fetchpush base task.
+    skill_conditioned:
+      base_task: fetchpush
+      skill_size: 2          # 2-D skill ↔ 2-D table-push target (keep == algo skill_size)
+      # ── q_φ I/O (Option A, decoupled input vs target) ──
+      # fetchpush obs = [q(6), dq(6), ee_pos(3), block_pos(3)] = 18 dims.
+      #   input  = FULL state (what physically determines the push outcome:
+      #            arm pose/vel + ee + current block pos).
+      #   target = block (x, y) = indices [15, 16]. q_φ models q(Δblock_xy | s, z)
+      #            → skills differentiate along the cube x,y on the table.
+      input_obs_indices:  [12,13,14,15,16,17]
+      target_obs_indices: [15, 16]
+      # ── forwarded fetchpush kwargs ──
+      max_delta: 0.20            # rad/step — small local moves (committed pushes)
+      init_noise: 0.20           # ± rad jitter on init arm pose
+      interaction_distance: 0.06 # m; ‖ee − block‖ below this = "touch"
+      # 2-D block (x, y) coverage grid (G² cells), bounds = FRONT table footprint
+      # (matches disagreement_multi_fetchpush.yaml so coverage is comparable).
+      coverage_grid_size: 16
+      coverage_lo: [0.10, -0.36]
+      coverage_hi: [0.50, 0.36]
+      rich_block_obs: true
+
+algorithms:
+  dads_disagreement:
+    # ─ SAC base ─
+    learning_rate: 3.0e-4
+    max_replay_size: 100_000
+    min_replay_size: 50_000
+    batch_size: 256
+    grad_updates_per_step: 64
+    tau: 0.005
+    discounting: 0.99
+    normalize_observations: true
+    reward_scaling: 1.0
+    num_eval_envs: 64
+    network_factory_kwargs:
+      hidden_layer_sizes: [1024, 1024]
+
+    # ─ DADS ─
+    skill_size: 2              # MUST equal env skill_conditioned.skill_size
+    skill_dyn_hidden_layer_sizes: [1024, 1024]
+    num_mixture_components: 4
+    skill_dyn_lr: 1.0e-3
+    skill_dyn_train_steps: 8
+    prior_samples: 300
+    fixed_std: 1.0
+    entropy_coef: 0.1
+    train_skill_dynamics_on_policy: true
+    is_clip_eps: 10.0
+
+    # r = r_dads + β · d_raw, using the RAW ensemble variance (NOT normalized), so
+    # the bonus self-anneals as the ensemble learns and DADS takes over. β must
+    # therefore absorb the raw scale: peak d_raw ≈ 0.03 on the standard 18-dim obs
+    # (≈0.10-0.14 with rich_block_obs), decaying ~15× by end of training. β ≈ 10
+    # ⇒ peak bonus ≈ 0.3 ≈ O(healthy r_dads); β ≈ 30 ⇒ peak ≈ 0.9 (exploration
+    # leads early, then fades). Watch reward_dads_dominance climb toward 1.
+    beta: 8.0
+    num_models: 5
+    ensemble_hidden_layer_sizes: [512, 512]
+    ensemble_lr: 3.0e-4
+    ensemble_train_steps: 8
+    bootstrap_keep_prob: 0.8
+    int_rew_ema_tau: 0.05
+
+    ensemble_reward_indices: block
+    ensemble_reward_bg_weight: 0.1
+    hindsight_relabeling: true
