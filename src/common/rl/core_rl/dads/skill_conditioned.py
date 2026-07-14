@@ -16,6 +16,7 @@ includes AutoResetWrapper-driven resets at episode end).
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Sequence
 from typing import Any
 
@@ -55,6 +56,37 @@ class SkillConditionedTask(BaseTask):
         self._input_idx = jnp.array(input_obs_indices, dtype=jnp.int32)
         self._target_idx = jnp.array(target_obs_indices, dtype=jnp.int32)
 
+        # ── exploration-hook delegation ─────────────────────────────────────
+        # The disagreement trainers log coverage_cumulative / state_entropy /
+        # interaction_cumulative from opt-in task hooks that read the obs with
+        # negative indices (e.g. block xy = obs[..., -3:-1]). We append z to the
+        # obs, which shifts those indices, so delegate to the BASE task's hooks
+        # with z stripped first. Only bind a hook if the base defines it, so the
+        # trainer's `callable(...)` detection stays honest for base tasks that
+        # don't expose coverage/interaction (e.g. ee_tracking).
+        if hasattr(self._base, "coverage_cell_from_obs"):
+            self.coverage_cell_from_obs = functools.partial(self._delegate_hook, "coverage_cell_from_obs")
+        if hasattr(self._base, "interaction_from_obs"):
+            self.interaction_from_obs = functools.partial(self._delegate_hook, "interaction_from_obs")
+
+    def _delegate_hook(self, name: str, obs: jax.Array) -> jax.Array:
+        """Call ``base.<name>(obs)`` after stripping the appended skill z."""
+        return getattr(self._base, name)(obs[..., : -self._skill_size])
+
+    @property
+    def coverage_num_cells(self) -> int:
+        """Block (x, y) coverage grid size from the base task (0 ⇒ no coverage)."""
+        return int(getattr(self._base, "coverage_num_cells", 0) or 0)
+
+    @property
+    def block_obs_indices(self) -> list[int] | None:
+        """Object obs-dim indices from the base task (for object-focused novelty).
+
+        z is appended AFTER the base obs, so the base indices are unchanged.
+        Returns None if the base task doesn't expose object indices.
+        """
+        return getattr(self._base, "block_obs_indices", None)
+
     # Brax PipelineEnv interface — delegate to base
     @property
     def sys(self):
@@ -67,6 +99,12 @@ class SkillConditionedTask(BaseTask):
     @property
     def robot(self):
         return self._base.robot
+
+    @property
+    def scene(self):
+        # Delegate the base task's scene so consumers that read it off the env
+        # (e.g. the video recorder's skybox-background) see it through the wrapper.
+        return getattr(self._base, "scene", None)
 
     @property
     def observation_size(self) -> int:
