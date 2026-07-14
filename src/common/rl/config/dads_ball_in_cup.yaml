@@ -1,0 +1,64 @@
+# DADS on dm_control's ball-in-cup (planar JAX/MJX port).
+#   python -m core_rl.train --robot parol6 --task skill_conditioned --algo dads --config <this file>
+# (--robot is required by train.py but ignored by the ball_in_cup task.)
+
+training:
+  total_timesteps: 20_000_000
+  num_envs: 4096
+  seed: 42
+
+env:
+  max_episode_steps: 200      # dm_control uses 1000 (20 s); shorter for DADS skills
+  control_dt: 0.02            # dm_control control timestep (50 Hz)
+  physics_dt: 0.002           # dm_control / MuJoCo default timestep → n_frames=10
+  backend: mjx
+  task_kwargs:
+    skill_conditioned:
+      base_task: ball_in_cup
+      # Absolute path to the model (carried in config, not hardcoded in source).
+      xml_path: /ros2_ws/core/src/ball_in_cup/ball_in_cup.xml
+
+      # ball_in_cup obs layout: [cup_x, cup_z, ball_x, ball_z,
+      #                          cup_vx, cup_vz, ball_vx, ball_vz]
+      #   target_obs_indices = ball position  → skills = "different ball motions"
+      #   input_obs_indices  = full state     → q_φ predicts Δ(ball pos) from all
+      input_obs_indices:  [0, 1, 2, 3, 4, 5, 6, 7]
+      target_obs_indices: [2, 3]
+
+algorithms:
+  dads:
+    learning_rate: 3.0e-4
+    max_replay_size: 10_000
+    min_replay_size: 2_000
+    batch_size: 256
+    tau: 0.005
+    discounting: 0.99
+    normalize_observations: true
+    reward_scaling: 1.0
+    num_eval_envs: 64
+    network_factory_kwargs:
+      hidden_layer_sizes: [512, 512]
+
+    skill_size: 2
+    skill_dyn_hidden_layer_sizes: [512, 512]
+    num_mixture_components: 4
+    skill_dyn_lr: 3.0e-4
+    skill_dyn_train_steps: 8
+    prior_samples: 100
+    # Target is the ball position in METERS — Δ per control step is small
+    # (cm-scale), so use a tight std (paper-default 1.0 is for radians).
+    fixed_std: 0.05
+    entropy_coef: 0.1
+
+callbacks:
+  redis:
+    enabled: true
+    host: redis
+    port: 6379
+    password: ""
+  mlflow:
+    enabled: true
+    tracking_uri: "http://mlflow:5000"
+
+export:
+  onnx: false  # DADS has no PD/robot export path
