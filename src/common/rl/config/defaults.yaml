@@ -3,14 +3,35 @@
 
 training:
   total_timesteps: 10_000_000
-  num_envs: 4096            # Brax vectorises via jax.vmap (GPU)
+  num_envs: 2048            # Brax vectorises via jax.vmap (GPU)
   seed: 42
 
 env:
-  max_episode_steps: 500
+  max_episode_steps: 200
   control_dt: 0.01          # 100 Hz control loop (matches ros2_control)
   physics_dt: 0.001         # MuJoCo timestep
   backend: mjx              # Simulation backend (mjx)
+  # Per-task kwargs forwarded to the task constructor via make_env.
+  # Keyed by the registered task name (matches --task on the CLI).
+  task_kwargs:
+    skill_conditioned:
+      base_task: ee_tracking
+      # Decoupled q_φ input vs target (Option A). q_φ models
+      # q(Δ_target | s_input, z) — predicts the change in the SKILL SPACE
+      # (target) from the variables that physically determine it (input).
+      #
+      # ee_tracking obs layout: [q(6), dq(6), ee_pos(3)]
+      #   input_obs_indices  = joint angles + velocities (drive Δee via
+      #                        the Jacobian: Δee ≈ J(q)·dq·dt).
+      #   target_obs_indices = ee_pos (the workspace coords skills are
+      #                        meant to produce diverse displacements in).
+      input_obs_indices:  [0,1,2,3,4,5,6,7,8,9,10,11]
+      target_obs_indices: [12,13,14]
+      # DADS needs (near-)fixed init so the policy doesn't burn its
+      # episode budget stabilising from a random start. Defaults to the
+      # joint mid-range with ±0.05 rad noise.
+      #   init_pose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]   # override here if needed
+      init_noise: 0.50
 
 algorithms:
   ppo:
@@ -33,8 +54,8 @@ algorithms:
   sac:
     # Brax SAC parameter names
     learning_rate: 3.0e-4
-    max_replay_size: 1_000_000
-    min_replay_size: 10_000
+    max_replay_size: 100_000
+    min_replay_size: 20_000
     batch_size: 256
     tau: 0.005
     discounting: 0.99
@@ -42,6 +63,173 @@ algorithms:
     reward_scaling: 1.0
     network_factory_kwargs:
       hidden_layer_sizes: [256, 256]
+
+  dads:
+    # ─ SAC base (mapped to Brax SAC parameter names by _map_config) ─
+    learning_rate: 3.0e-4
+    max_replay_size: 100_000      # small ⇒ near-on-policy, like the paper
+    min_replay_size: 50_000
+    batch_size: 256
+    grad_updates_per_step: 64
+    tau: 0.005
+    discounting: 0.99
+    normalize_observations: true
+    reward_scaling: 1.0
+    num_eval_envs: 64            # keep small — eval JIT-graph = num_eval_envs × episode_length
+    network_factory_kwargs:
+      hidden_layer_sizes: [512, 512]
+
+    # ─ DADS-specific (consumed by dads.py, NOT passed through to Brax SAC) ─
+    skill_size: 3     # Equal to the degrees of freedom
+    skill_dyn_hidden_layer_sizes: [512, 512]
+    num_mixture_components: 4
+    skill_dyn_lr: 3.0e-4
+    skill_dyn_train_steps: 8     # nb of fresh-minibatch q_φ updates per training_step
+    prior_samples: 100           # L — MC samples for the denominator of r_z
+    # q_φ's fixed Gaussian std. With running-stats target normalization
+    # (the Δs target is standardized to ~unit variance before q_φ), the
+    # natural std is 1.0 — the paper's value. The normalization adapts the
+    # scale automatically, so the old manual per-task std (e.g. 0.05 for
+    # ee_pos meters) is no longer needed.
+    fixed_std: 1.0
+    # Fix the SAC entropy coefficient α (DADS paper uses 0.1 with NO auto-tuning).
+    # Comment this out to fall back to Brax's auto-tuned alpha.
+    entropy_coef: 0.1
+    # q_φ data source:
+    #   true  → q_φ trains ONLY on the fresh actor_step batch (no IS needed,
+    #           IS weights = 1 by construction). Requires
+    #           skill_dyn_train_steps × batch_size ≤ num_envs.
+    #   false → q_φ samples the off-policy replay buffer and reweights each
+    #           transition by the clipped importance ratio
+    #           w = clip(exp(log π_cur − log π_old), 1/α, α).
+    train_skill_dynamics_on_policy: true
+    # IS clip range α (paper: is_clip_eps = 10). Only consumed when
+    # train_skill_dynamics_on_policy = false.
+    is_clip_eps: 10.0
+
+  dads_disagreement:
+    # ── Disagreement-fuelled skill discovery ──
+    # DADS exactly as above, plus a forward ensemble supplying a novelty bonus:
+    #     r = r_dads(s, z, Δ) + β · d̂(s, a)
+    # β = 0 recovers vanilla DADS; single-agent `disagreement` (no skills) is the
+    # other reference arm. The keys below are the union of `dads` and the
+    # ensemble knobs of `disagreement`.
+
+    # ─ SAC base (mapped to Brax SAC parameter names) ─
+    learning_rate: 3.0e-4
+    max_replay_size: 100_000      # small ⇒ near-on-policy, like the paper
+    min_replay_size: 50_000
+    batch_size: 256
+    grad_updates_per_step: 64
+    tau: 0.005
+    discounting: 0.99
+    normalize_observations: true
+    reward_scaling: 1.0
+    num_eval_envs: 64
+    network_factory_kwargs:
+      hidden_layer_sizes: [512, 512]
+
+    # ─ DADS-specific ─
+    skill_size: 3
+    skill_dyn_hidden_layer_sizes: [512, 512]
+    num_mixture_components: 4
+    skill_dyn_lr: 3.0e-4
+    skill_dyn_train_steps: 8
+    prior_samples: 100
+    fixed_std: 1.0
+    entropy_coef: 0.1
+    train_skill_dynamics_on_policy: true
+    is_clip_eps: 10.0
+
+    # ─ Disagreement-specific ─
+    # β trades novelty vs. skill-structure. Too large ⇒ skill collapse (all skills
+    # chase the same frontier); too small ⇒ vanilla DADS. Sweep {0, small, large}
+    # and look for an intermediate band where coverage beats β=0 AND skills stay
+    # distinguishable. The bonus self-anneals (d̂ → 0 as the ensemble learns), so
+    # β only sets the EARLY balance.
+    beta: 0.5
+    num_models: 5               # K — paper uses 5
+    ensemble_hidden_layer_sizes: [256, 256]
+    ensemble_lr: 3.0e-4
+    ensemble_train_steps: 8     # ensemble Adam steps on the fresh batch per training_step
+    bootstrap_keep_prob: 0.8    # per-model per-sample bootstrap mask
+    int_rew_ema_tau: 0.05       # EMA rate of the disagreement reward-scale normalizer
+
+  disagreement:
+    # ─ PPO base (same keys as algorithms.ppo, mapped by _map_config) ─
+    learning_rate: 3.0e-4
+    unroll_length: 20
+    num_minibatches: 32
+    num_updates_per_batch: 4
+    discounting: 0.99
+    gae_lambda: 0.95
+    clipping_epsilon: 0.2
+    entropy_cost: 1.0e-3        # reference uses 0.001 — pure-exploration policies need some entropy
+    vf_loss_coefficient: 0.5
+    max_grad_norm: 0.5
+    normalize_observations: true
+    reward_scaling: 1.0
+    network_factory_kwargs:
+      hidden_layer_sizes: [256, 256]
+
+    # ─ Disagreement-specific (consumed by disagreement.py, not passed to Brax) ─
+    num_models: 5               # K — paper uses 5
+    ensemble_hidden_layer_sizes: [256, 256]
+    ensemble_lr: 3.0e-4
+    ensemble_train_steps: 8     # full-batch Adam steps on the fresh rollout per training_step
+    bootstrap_keep_prob: 0.8    # per-model per-sample bootstrap mask (reference: dropout 0.8)
+    int_coeff: 1.0
+    ext_coeff: 0.0              # pure exploration; set 1.0 to add the sparse env reward
+    int_rew_ema_tau: 0.05       # EMA rate of the reward-scale normalizer
+    # Auto-reset semantics. false → Brax default (each env's first reset is
+    # cached and replayed every episode; with thousands of envs this already
+    # samples the init distribution densely). true → resample-on-done: a fresh
+    # init pose every episode (≈ standard-gym semantics, and matches DADS so a
+    # head-to-head exploration comparison differs ONLY in the intrinsic reward).
+    # Costs ~1.5–2x rollout time (one env.reset() per step). See §3.6.
+    resample_on_reset: false
+
+  random:
+    # Uniform-random action baseline (no learning). Calibrates the
+    # state-coverage / behavioral-diversity metrics for the exploration arms.
+    # Reuses the same env wrapping + Brax evaluator, so its eval/* and
+    # training/coverage_cumulative curves overlay the disagreement run.
+    num_eval_envs: 128
+    action_repeat: 1
+    # Match the exploration arm's reset semantics for a fair coverage comparison.
+    resample_on_reset: false
+
+  disagreement_multi:
+    # Multi-agent disagreement: ONE shared policy trunk + `num_policy_heads`
+    # heads, sharing one ensemble + one value network. Envs are split into
+    # contiguous blocks (num_envs / num_policy_heads per head); each head trains
+    # on its own block, the trunk/value/ensemble on all envs. See §9.
+    learning_rate: 3.0e-4
+    unroll_length: 20
+    num_minibatches: 32
+    num_updates_per_batch: 4
+    discounting: 0.99
+    gae_lambda: 0.95
+    clipping_epsilon: 0.2
+    entropy_cost: 1.0e-3
+    vf_loss_coefficient: 0.5
+    max_grad_norm: 0.5
+    normalize_observations: true
+    reward_scaling: 1.0
+    network_factory_kwargs:
+      hidden_layer_sizes: [256, 256]   # used for the shared trunk AND value net
+
+    num_policy_heads: 4                # m — number of policy heads (agents)
+
+    num_models: 5
+    ensemble_hidden_layer_sizes: [256, 256]
+    ensemble_lr: 3.0e-4
+    ensemble_train_steps: 8
+    bootstrap_keep_prob: 0.8
+    int_coeff: 1.0
+    ext_coeff: 0.0
+    int_rew_ema_tau: 0.05
+    resample_on_reset: false
 
 callbacks:
   redis:

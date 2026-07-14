@@ -383,6 +383,9 @@ class BaseTask(brax_env.PipelineEnv):
 
 # Import concrete tasks to trigger registration
 from core_rl.dads import skill_conditioned as _skill  # noqa: F401, E402
+from core_rl.tasks import ball_in_cup as _ball_in_cup  # noqa: F401, E402
 from core_rl.tasks import ee_tracking as _ee  # noqa: F401, E402
+from core_rl.tasks import fetchpush as _fetchpush  # noqa: F401, E402
+from core_rl.tasks import fetchpush_goal as _fetchpush_goal  # noqa: F401, E402
 from core_rl.tasks import joint_tracking as _joint_tracking  # noqa: F401, E402
 from core_rl.tasks import reach_object as _reach  # noqa: F401, E402

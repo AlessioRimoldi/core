@@ -21,7 +21,7 @@ import yaml
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 
 from core_rl.algorithms import get_algorithm  # noqa: E402
-from core_rl.callbacks import ProgressFn, compose_progress_fn  # noqa: E402
+from core_rl.callbacks import FirstSuccessHook, ProgressFn, compose_progress_fn  # noqa: E402
 from core_rl.callbacks.mlflow_logger import MLflowHook  # noqa: E402
 from core_rl.callbacks.redis_stream import RedisStreamHook  # noqa: E402
 from core_rl.env import make_env  # noqa: E402
@@ -87,6 +87,12 @@ def main():
     parser.add_argument(
         "--video-envs", type=int, default=16, help="Number of envs in the video grid (must be a perfect square)"
     )
+    parser.add_argument(
+        "--stochastic-video",
+        action="store_true",
+        help="Record video with the sampled (stochastic) policy instead of the mean action. Use for "
+        "pure-exploration policies (ext_coeff=0), whose mean action degenerately parks at joint limits.",
+    )
     args = parser.parse_args()
 
     # Load config
@@ -139,13 +145,13 @@ def main():
     # for one size while the env samples z of another size — silent garbage.
     # Auto-sync from the algo config when DADS + skill_conditioned, and
     # error out if the user set both to inconsistent values.
-    if args.algo == "dads" and args.task == "skill_conditioned":
-        algo_skill_size = config["algorithms"].get("dads", {}).get("skill_size")
+    if args.algo in ("dads", "dads_disagreement") and args.task == "skill_conditioned":
+        algo_skill_size = config["algorithms"].get(args.algo, {}).get("skill_size")
         env_skill_size = task_kwargs.get("skill_size")
         if algo_skill_size is not None:
             if env_skill_size is not None and int(env_skill_size) != int(algo_skill_size):
                 raise SystemExit(
-                    f"skill_size mismatch: algorithms.dads.skill_size={algo_skill_size} "
+                    f"skill_size mismatch: algorithms.{args.algo}.skill_size={algo_skill_size} "
                     f"vs env.task_kwargs.skill_conditioned.skill_size={env_skill_size}. "
                     "Set them equal, or remove one to let auto-sync handle it."
                 )
@@ -242,6 +248,11 @@ def main():
 
     progress_hook, pbar = _make_progress_hook(total_timesteps)
     hooks.append(progress_hook)
+
+    # Time-to-first-success: must run BEFORE the MLflow/Redis hooks so the
+    # injected eval/first_success_step + eval/has_succeeded keys get logged.
+    hooks.insert(0, FirstSuccessHook())
+
     progress_fn = compose_progress_fn(*hooks)
 
     # ── 3b. Video recording hook (policy_params_fn) ──
@@ -257,8 +268,10 @@ def main():
             grid_cols=grid_side,
             grid_rows=grid_side,
             episode_length=env_cfg["max_episode_steps"],
+            deterministic=not args.stochastic_video,
         )
-        print(f"  Video recording: every {args.video_interval} updates, {grid_side}x{grid_side} grid")
+        mode = "stochastic" if args.stochastic_video else "deterministic"
+        print(f"  Video recording: every {args.video_interval} updates, {grid_side}x{grid_side} grid ({mode} policy)")
 
     print()
 
