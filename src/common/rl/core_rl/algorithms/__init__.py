@@ -88,5 +88,9 @@ class BaseAlgorithm(ABC):
 
 # Import concrete algorithms to trigger registration
 from core_rl.algorithms import ppo as _  # noqa: F401, E402
+from core_rl.algorithms import random_explore as _random  # noqa: F401, E402
 from core_rl.algorithms import sac as _sac  # noqa: F401, E402
 from core_rl.dads import dads as _dads  # noqa: F401, E402
+from core_rl.dads_disagreement import dads_disagreement as _dads_disagreement  # noqa: F401, E402
+from core_rl.disagreement import disagreement as _disagreement  # noqa: F401, E402
+from core_rl.disagreement import disagreement_multi as _disagreement_multi  # noqa: F401, E402

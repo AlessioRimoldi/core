@@ -28,7 +28,11 @@ class EETrackingTask(BaseTask):
         and leads to mode collapse.
 
         Override ``init_pose`` to pin a custom home pose, or set
-        ``init_noise=0.0`` for a strictly fixed start.
+        ``init_noise=0.0`` for a strictly fixed start. Set
+        ``random_init=True`` to instead sample ``q_init`` uniformly over the
+        full joint range [q_lower, q_upper] (a *completely random* start —
+        ``init_pose``/``init_noise`` are then ignored). Useful for probing
+        skill robustness to arbitrary initial states.
     """
 
     def __init__(
@@ -44,6 +48,10 @@ class EETrackingTask(BaseTask):
         acceleration_penalty: float = 3e-6,
         init_pose: Sequence[float] | None = None,
         init_noise: float = 0.05,
+        random_init: bool = False,
+        coverage_grid_size: int = 10,
+        coverage_lo: Sequence[float] = (-0.5, -0.5, -0.1),
+        coverage_hi: Sequence[float] = (0.5, 0.5, 0.8),
         backend: str = "mjx",
         n_frames: int = 10,
         **kwargs: Any,
@@ -73,6 +81,18 @@ class EETrackingTask(BaseTask):
                 raise ValueError(f"init_pose must have shape ({self.robot.num_joints},), " f"got {tuple(init_q.shape)}")
             self._init_q = init_q
         self._init_noise = float(init_noise)
+        self._random_init = bool(random_init)
+
+        # --- exploration coverage grid over the 3D end-effector workspace ---
+        # Opt-in API read by the disagreement trainers to log coverage_cumulative
+        # + state_entropy over where the EE actually goes (obs[..., -3:] = ee
+        # world x, y, z). Bounds are a generous PAROL6 box and are edge-clipped,
+        # so out-of-range positions fall into the boundary cells; tighten via
+        # task_kwargs once you see the realised EE range for sharper resolution.
+        self._cov_g = int(coverage_grid_size)
+        self._cov_lo = jnp.asarray(coverage_lo, dtype=jnp.float32)
+        self._cov_hi = jnp.asarray(coverage_hi, dtype=jnp.float32)
+        self._cov_ncells = self._cov_g**3
 
     @property
     def observation_size(self) -> int:
@@ -81,6 +101,24 @@ class EETrackingTask(BaseTask):
     @property
     def action_size(self) -> int:
         return self.robot.num_joints
+
+    @property
+    def coverage_num_cells(self) -> int:
+        """Number of cells in the EE (x, y, z) coverage grid (G³)."""
+        return self._cov_ncells
+
+    def coverage_cell_from_obs(self, obs: jax.Array) -> jax.Array:
+        """Flat grid-cell index from a (possibly batched) observation vector.
+
+        obs = [q, dq, ee_pos]; the last three dims are the end-effector world
+        (x, y, z). The disagreement trainers call this to accumulate cumulative
+        coverage / state entropy straight from rollout observations. Batched obs
+        of shape (N, obs_size) works element-wise and returns (N,).
+        """
+        ee = obs[..., -3:]
+        frac = (ee - self._cov_lo) / (self._cov_hi - self._cov_lo)
+        g = jnp.clip((frac * self._cov_g).astype(jnp.int32), 0, self._cov_g - 1)
+        return (g[..., 0] * self._cov_g + g[..., 1]) * self._cov_g + g[..., 2]
 
     def reset(self, rng: jax.Array) -> brax_env.State:
         """
@@ -102,16 +140,25 @@ class EETrackingTask(BaseTask):
         ee_target_pipeline = self.pipeline_init(q_target, jnp.zeros(self.sys.qd_size()))
         ee_target = self._get_ee_pos(ee_target_pipeline)
 
-        # Initial robot pose: fixed home pose (self._init_q) ± per-joint
-        # uniform noise of ±init_noise rad. Clip to joint limits so the
-        # noise never pushes the start out of the legal range.
-        noise = jax.random.uniform(
-            rng_init_q,
-            shape=(self.robot.num_joints,),
-            minval=-self._init_noise,
-            maxval=self._init_noise,
-        )
-        q_init = jnp.clip(self._init_q + noise, self._q_lower, self._q_upper)
+        # Initial robot pose. Either:
+        #  - completely random: q_init ~ U(q_lower, q_upper) per joint, or
+        #  - fixed home pose (self._init_q) ± per-joint uniform noise of
+        #    ±init_noise rad, clipped to the joint limits.
+        if self._random_init:
+            q_init = jax.random.uniform(
+                rng_init_q,
+                shape=(self.robot.num_joints,),
+                minval=self._q_lower,
+                maxval=self._q_upper,
+            )
+        else:
+            noise = jax.random.uniform(
+                rng_init_q,
+                shape=(self.robot.num_joints,),
+                minval=-self._init_noise,
+                maxval=self._init_noise,
+            )
+            q_init = jnp.clip(self._init_q + noise, self._q_lower, self._q_upper)
 
         q = jnp.zeros(self.sys.q_size())
         q = q.at[self._joint_q_indices].set(q_init)
