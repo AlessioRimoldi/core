@@ -233,7 +233,23 @@ class DadsEvaluator:
             s_target_next = se["s_target_next"].reshape(-1, target_obs_size)
             # action is already on the transition (no extra_fields plumbing).
             action = transitions.action.reshape(-1, transitions.action.shape[-1])
-            return final_state, s_input, z, s_target, s_target_next, action
+            # Per-env (= per-SKILL, z fixed for the episode) cube-trajectory
+            # summaries, from the UNFLATTENED (L, envs, target) target = cube pos.
+            # RESET-BOUNDARY CARE: actor_step reads extras from the POST-step
+            # info, and ResampleAutoResetWrapper splices the RESET info into the
+            # done step — so the final transition's s_target AND s_target_next
+            # are both the post-reset (re-jittered) cube position. Using either
+            # measures init jitter, not pushing (bit us twice: constant
+            # push_dist ≈ E‖jitter−jitter‖ ≈ 0.031 across all runs). The last
+            # valid in-episode state is stn[-2] (state after step L−2), so net
+            # displacement and path both drop the final transition entirely.
+            # Assumes episodes only end by truncation at episode_length (true
+            # for fetchpush: no early termination) and L ≥ 2.
+            st = se["s_target"]  # (L, envs, target)
+            stn = se["s_target_next"]  # (L, envs, target)
+            cube_net_disp = stn[-2] - st[0]  # (envs, target) — net push per skill
+            cube_path_len = jnp.sum(jnp.linalg.norm(stn[:-1] - st[:-1], axis=-1), axis=0)  # (envs,)
+            return final_state, s_input, z, s_target, s_target_next, action, cube_net_disp, cube_path_len
 
         self._eval_unroll = jax.jit(eval_unroll)
         # q_φ forward passes are cheap at full B (no L factor), so jit them once.
@@ -286,7 +302,9 @@ class DadsEvaluator:
         self._key, unroll_key, metrics_key = jax.random.split(self._key, 3)
 
         t = time.time()
-        eval_state, s_input, z, s_target, s_target_next, action = self._eval_unroll(policy_params, unroll_key)
+        eval_state, s_input, z, s_target, s_target_next, action, cube_net_disp, cube_path_len = self._eval_unroll(
+            policy_params, unroll_key
+        )
         delta_target = s_target_next - s_target
 
         # ── Standard brax episode metrics (identical to acting.Evaluator) ──
@@ -318,6 +336,30 @@ class DadsEvaluator:
         # (no inner training steps as in sgd_step).
         dads_metrics["q_phi_loss"] = self._q_phi_loss(skill_dynamics_params, s_input, z, delta_target, qphi_norm)
         metrics.update({f"eval/{name}": np.asarray(value) for name, value in dads_metrics.items()})
+
+        # ── cube-skill metrics (interpretable, in cube-position units) ──
+        # cube_net_disp: (envs, target) net cube push of each skill's episode.
+        #   push_dist_mean       — how far skills push the cube (0 ⇒ cube untouched).
+        #   push_directedness    — ‖net push‖ / path length ∈ [0,1]; ~1 = clean push,
+        #                          ~0 = jitter in place (contact but no transport).
+        #   skill_cube_disp_spread — spread of the net-push VECTORS across skills:
+        #                          the direct "do different skills move the cube to
+        #                          different places" signal (upper bound — includes
+        #                          intra-skill noise, but 0 ⇒ skills are cube-identical).
+        #   push_dir_entropy     — magnitude-weighted entropy of push DIRECTIONS over
+        #                          8 bins (0 ⇒ all one way; log8 ⇒ pushes every way).
+        cube_net_disp = np.asarray(cube_net_disp)  # (envs, target)
+        cube_path_len = np.asarray(cube_path_len)  # (envs,)
+        push_dist = np.linalg.norm(cube_net_disp, axis=-1)  # (envs,)
+        spread = float(np.sqrt(((cube_net_disp - cube_net_disp.mean(axis=0)) ** 2).sum(axis=-1).mean()))
+        metrics["eval/cube_push_dist_mean"] = float(push_dist.mean())
+        metrics["eval/cube_push_directedness"] = float((push_dist / (cube_path_len + 1e-8)).mean())
+        metrics["eval/skill_cube_disp_spread"] = spread
+        if cube_net_disp.shape[-1] >= 2:  # need x,y for a push direction
+            ang = np.arctan2(cube_net_disp[:, 1], cube_net_disp[:, 0])  # (envs,)
+            hist, _ = np.histogram(ang, bins=8, range=(-np.pi, np.pi), weights=push_dist)
+            p = hist / (hist.sum() + 1e-8)
+            metrics["eval/cube_push_dir_entropy"] = float(-(p * np.log(p + 1e-8)).sum())
 
         epoch_eval_time = time.time() - t
         metrics["eval/epoch_eval_time"] = epoch_eval_time
