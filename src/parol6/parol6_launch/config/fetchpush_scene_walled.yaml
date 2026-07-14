@@ -1,0 +1,74 @@
+# FetchPush scene WITH low perimeter walls so the block cannot be pushed off the
+# table (and thus become unreachable / fall to the floor). Identical to
+# fetchpush_scene.yaml except for the four static wall boxes around the table
+# edge. Walls are static (dynamic:false) → injected as fixed bodies with real
+# collision geoms, so the block bounces off them instead of leaving the table.
+# The block body id is resolved by NAME, so adding walls does not perturb it.
+#
+# Why walls (not reset-on-too-far): terminating/teleporting when the cube goes
+# far penalizes the exact far-pushing we reward and corrupts the value bootstrap
+# / disagreement signal. Walls keep the cube in the workspace with continuous,
+# honest physics; the per-episode auto-reset (≤200 steps) re-centers it anyway.
+#
+# Layout (top-down, +x forward from robot base, +y left):
+#
+#                          ┌──────────────────┐   ← walls on all 4 edges
+#      ·          arm  →   │     ▣ block      │   table surface, top z=+0.01
+#    (base, x=0)           │                  │   walls: z∈[0.01,0.06], 1 cm thick
+#                          └──────────────────┘
+#                        x=0.10            x=0.50
+#                              y ∈ [-0.36, +0.36]
+
+background: [0.7, 0.85, 1.0]
+
+objects:
+  - name: table
+    type: box
+    size: [0.20, 0.36, 0.02]          # half-extents → x∈[0.10,0.50], y∈[-0.36,0.36], top z=+0.01
+    position: [0.30, 0.0, -0.01]
+    orientation: [0.0, 0.0, 0.0]
+    color: [0.6, 0.4, 0.2, 1.0]
+    dynamic: false
+
+  - name: block
+    type: box
+    size: [0.02, 0.02, 0.02]          # 4 × 4 × 4 cm cube
+    position: [0.25, 0.0, 0.03]
+    orientation: [0.0, 0.0, 0.0]
+    color: [0.2, 0.3, 0.9, 1.0]
+    dynamic: true
+    mass: 0.3                         # Increased mass
+    role: target
+    randomize_position: [0.10, 0.20, 0.0]
+
+  # ── perimeter walls (static, translucent so they don't hide the block) ──
+  # Each wall: 1 cm thick, 5 cm tall (z∈[0.01,0.06], > 4 cm cube), flush to the
+  # table edge. Centered on the edge line so the full table stays usable.
+  - name: wall_far        # +x edge (x = 0.50), far from the robot
+    type: box
+    size: [0.01, 0.36, 0.025]
+    position: [0.50, 0.0, 0.035]
+    orientation: [0.0, 0.0, 0.0]
+    color: [0.55, 0.55, 0.6, 0.25]
+    dynamic: false
+  - name: wall_near       # -x edge (x = 0.10), robot side
+    type: box
+    size: [0.01, 0.36, 0.025]
+    position: [0.10, 0.0, 0.035]
+    orientation: [0.0, 0.0, 0.0]
+    color: [0.55, 0.55, 0.6, 0.25]
+    dynamic: false
+  - name: wall_left       # +y edge (y = 0.36)
+    type: box
+    size: [0.20, 0.01, 0.025]
+    position: [0.30, 0.36, 0.035]
+    orientation: [0.0, 0.0, 0.0]
+    color: [0.55, 0.55, 0.6, 0.25]
+    dynamic: false
+  - name: wall_right      # -y edge (y = -0.36)
+    type: box
+    size: [0.20, 0.01, 0.025]
+    position: [0.30, -0.36, 0.035]
+    orientation: [0.0, 0.0, 0.0]
+    color: [0.55, 0.55, 0.6, 0.25]
+    dynamic: false
