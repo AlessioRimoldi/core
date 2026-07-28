@@ -194,6 +194,15 @@ def train(
     int_coeff: float = 1.0,
     ext_coeff: float = 0.0,
     int_rew_ema_tau: float = 0.05,
+    # Optional per-target-dim weights, shared by the disagreement bonus AND the
+    # ensemble loss (capacity goes where the reward looks). Shape = the
+    # ensemble's target size (obs_size, + feature dims if pos features are on).
+    # None = uniform mean over dims. Same semantics as the multi-head trainer.
+    ensemble_reward_weights: Any = None,
+    # Optional frozen random position-feature map (ensemble.make_position_features):
+    # target becomes concat([Δnorm(obs), φ(next_obs[pos_indices])]).
+    ensemble_pos_feature_fn: Any = None,
+    ensemble_pos_indices: Any = None,  # raw-obs dims fed to φ (required with fn)
     # eval
     num_evals: int = 1,
     eval_env: envs.Env | None = None,
@@ -422,9 +431,16 @@ def train(
         optimizer = base_optimizer
 
     # --- disagreement ---
+    if ensemble_pos_feature_fn is not None and ensemble_pos_indices is None:
+        raise ValueError("ensemble_pos_feature_fn requires ensemble_pos_indices")
+    _pos_idx = None if ensemble_pos_indices is None else jnp.asarray(ensemble_pos_indices, dtype=jnp.int32)
     ensemble_optimizer = optax.adam(learning_rate=ensemble_lr)
+    # The loss shares the reward's per-dim weights so ensemble capacity
+    # concentrates on the dims the intrinsic reward reads (see ensemble_loss).
     ensemble_update = gradients.gradient_update_fn(
-        functools.partial(ensemble_loss, ensemble_network, keep_prob=bootstrap_keep_prob),
+        functools.partial(
+            ensemble_loss, ensemble_network, keep_prob=bootstrap_keep_prob, weights=ensemble_reward_weights
+        ),
         ensemble_optimizer,
         pmap_axis_name=_PMAP_AXIS_NAME,
     )
@@ -635,9 +651,19 @@ def train(
         # by running_statistics.update, even when normalize_observations=False.
         s_n = running_statistics.normalize(obs_f, normalizer_params)
         target = running_statistics.normalize(next_obs_f, normalizer_params) - s_n
+        if ensemble_pos_feature_fn is not None:
+            # Append φ(next position) — ABSOLUTE features of where the agent
+            # ends up (from RAW obs; φ's length scale is in meters). See
+            # ensemble.make_position_features for why absolute, why random.
+            target = jnp.concatenate([target, ensemble_pos_feature_fn(next_obs_f[:, _pos_idx])], axis=-1)
 
         # 1) Intrinsic reward from the PRE-update ensemble (reference ordering).
-        r_int = disagreement_reward(ensemble_network, training_state.ensemble_params, s_n, act_f) * mask_f  # (B·T,)
+        r_int = (
+            disagreement_reward(
+                ensemble_network, training_state.ensemble_params, s_n, act_f, weights=ensemble_reward_weights
+            )
+            * mask_f
+        )  # (B·T,)
 
         # 2) Scale normalization: EMA of mean(r_int²), shared across devices.
         batch_msq = jax.lax.pmean(jnp.mean(r_int**2), axis_name=_PMAP_AXIS_NAME)

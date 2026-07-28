@@ -43,7 +43,58 @@ class TrainingState:
     int_rew_rms: jnp.ndarray  # EMA of mean(r_int²) — reward scale normalizer
     coverage_grid: jnp.ndarray  # (ncells,) lifetime-visited occupancy (float 0/1)
     visit_counts: jnp.ndarray  # (ncells,) lifetime per-cell visit counts → entropy
+    head_visit_counts: jnp.ndarray  # (m, ncells) lifetime PER-HEAD visit counts → partition metrics
     interaction_count: jnp.ndarray  # () lifetime count of object-contact timesteps
+
+
+def make_multihead_inference_fn(
+    observation_size: int,
+    action_size: int,
+    policy_hidden_layer_sizes: tuple[int, ...] = (256, 256),
+    normalize_observations: bool = True,
+):
+    """Standalone ``make_policy`` for params saved by this trainer (eval/analysis).
+
+    Mirrors the in-training ``make_multihead_policy``: shared trunk + m linear
+    heads, env i → head ``i // (n / m)`` (contiguous blocks). ``m`` is inferred
+    from the params' ``heads`` leading axis, so one inference fn serves any
+    head count. ``params`` is the 3-tuple returned by ``train()`` /
+    ``DisagreementAlgorithm.save``: (normalizer_params, policy_params, value_params).
+    """
+    parametric_action_distribution = distribution.NormalTanhDistribution(event_size=action_size)
+    param_size = parametric_action_distribution.param_size
+    policy_trunk = base_networks.MLP(
+        layer_sizes=tuple(policy_hidden_layer_sizes),
+        activation=linen.swish,
+        activate_final=True,
+    )
+    policy_head_module = base_networks.MLP(
+        layer_sizes=(param_size,),
+        activation=linen.swish,
+        activate_final=False,
+    )
+
+    def make_policy(params, deterministic: bool = False):
+        norm_p, policy_p = params[0], params[1]
+        m_heads = jax.tree_util.tree_leaves(policy_p["heads"])[0].shape[0]
+
+        def policy(observations: jnp.ndarray, key_sample: PRNGKey):
+            obs = running_statistics.normalize(observations, norm_p) if normalize_observations else observations
+            n = obs.shape[0]
+            obs_g = obs.reshape(m_heads, n // m_heads, obs.shape[-1])
+
+            def head_logits(head_p, obs_h):
+                return policy_head_module.apply(head_p, policy_trunk.apply(policy_p["trunk"], obs_h))
+
+            logits = jax.vmap(head_logits)(policy_p["heads"], obs_g).reshape(n, -1)
+            if deterministic:
+                return parametric_action_distribution.mode(logits), {}
+            raw = parametric_action_distribution.sample_no_postprocessing(logits, key_sample)
+            return parametric_action_distribution.postprocess(raw), {}
+
+        return policy
+
+    return make_policy
 
 
 def _unpmap(v):
@@ -200,9 +251,15 @@ def train(
     int_coeff: float = 1.0,
     ext_coeff: float = 0.0,
     int_rew_ema_tau: float = 0.05,
-    # Optional per-obs-dim weights for the disagreement bonus (shape obs_size).
+    # Optional per-target-dim weights, shared by the disagreement bonus AND the
+    # ensemble loss (capacity goes where the reward looks). Shape = the
+    # ensemble's target size (obs_size, + feature dims if pos features are on).
     # None = uniform mean over dims
     ensemble_reward_weights: Any = None,
+    # Optional frozen random position-feature map (ensemble.make_position_features):
+    # target becomes concat([Δnorm(obs), φ(next_obs[pos_indices])]).
+    ensemble_pos_feature_fn: Any = None,
+    ensemble_pos_indices: Any = None,  # raw-obs dims fed to φ (required with fn)
     # eval
     num_evals: int = 1,
     eval_env: envs.Env | None = None,
@@ -318,6 +375,15 @@ def train(
       Tuple of (make_policy function, network params, metrics)
     """
     assert batch_size * num_minibatches % num_envs == 0
+
+    if save_checkpoint_path is not None or restore_checkpoint_path is not None:
+        # Brax's PPO checkpoint format assumes the stock network layout; the
+        # multi-head policy params are {'trunk', 'heads'} and would save with a
+        # wrong network_config / restore with a mismatched structure.
+        raise NotImplementedError(
+            "Brax checkpointing is not supported by multi_agent_disagreement_ppo — "
+            "use the returned params (or restore_params from a previous multi-head run) instead."
+        )
 
     m_heads = int(num_policy_heads)
     assert m_heads >= 1
@@ -507,7 +573,13 @@ def train(
     lr_schedule = ppo_optimizer.LRSchedule(lr_schedule)
     lr_is_adaptive_kl = lr_schedule == ppo_optimizer.LRSchedule.ADAPTIVE_KL
     if lr_is_adaptive_kl:
-        base_optimizer = optax.inject_hyperparams(optax.adam)(learning_rate=learning_rate)
+        # The single-agent trainer adapts the LR from kl_mean inside
+        # minibatch_step; this trainer never implemented that, and silently
+        # running at fixed LR would make single/multi arm comparisons unfair.
+        raise NotImplementedError(
+            "adaptive_kl learning_rate_schedule is not implemented in "
+            "multi_agent_disagreement_ppo — use a fixed learning rate."
+        )
     if max_grad_norm is not None:
         # TODO(btaba): Move gradient clipping to `training/gradients.py`.
         optimizer = optax.chain(
@@ -518,9 +590,16 @@ def train(
         optimizer = base_optimizer
 
     # --- disagreement ---
+    if ensemble_pos_feature_fn is not None and ensemble_pos_indices is None:
+        raise ValueError("ensemble_pos_feature_fn requires ensemble_pos_indices")
+    _pos_idx = None if ensemble_pos_indices is None else jnp.asarray(ensemble_pos_indices, dtype=jnp.int32)
     ensemble_optimizer = optax.adam(learning_rate=ensemble_lr)
+    # The loss shares the reward's per-dim weights so ensemble capacity
+    # concentrates on the dims the intrinsic reward reads (see ensemble_loss).
     ensemble_update = gradients.gradient_update_fn(
-        functools.partial(ensemble_loss, ensemble_network, keep_prob=bootstrap_keep_prob),
+        functools.partial(
+            ensemble_loss, ensemble_network, keep_prob=bootstrap_keep_prob, weights=ensemble_reward_weights
+        ),
         ensemble_optimizer,
         pmap_axis_name=_PMAP_AXIS_NAME,
     )
@@ -707,9 +786,19 @@ def train(
             # Lifetime per-cell visit counts (summed across devices) → state entropy.
             batch_counts = jnp.zeros((_cov_grid_size,), jnp.float32).at[cov_cells].add(1.0)
             visit_counts = training_state.visit_counts + jax.lax.psum(batch_counts, axis_name=_PMAP_AXIS_NAME)
+            # Lifetime PER-HEAD visit counts → niche-partition metrics. Flat
+            # sample i sits in row b = i // T (b = l·num_envs_local + e), and
+            # env e belongs to head e // per_head_envs (contiguous blocks — the
+            # same routing the rollout policy and group_by_head use).
+            _sample_head = ((jnp.arange(obs_f.shape[0]) // unroll_length) % num_envs_local) // (
+                num_envs_local // m_heads
+            )
+            head_batch = jnp.zeros((m_heads, _cov_grid_size), jnp.float32).at[_sample_head, cov_cells].add(1.0)
+            head_visit_counts = training_state.head_visit_counts + jax.lax.psum(head_batch, axis_name=_PMAP_AXIS_NAME)
         else:
             coverage_grid = training_state.coverage_grid
             visit_counts = training_state.visit_counts
+            head_visit_counts = training_state.head_visit_counts
 
         # Cumulative object interaction: count contact timesteps over all rollouts
         # (summed across devices so replicas stay identical).
@@ -724,6 +813,11 @@ def train(
         # by running_statistics.update, even when normalize_observations=False.
         s_n = running_statistics.normalize(obs_f, normalizer_params)
         target = running_statistics.normalize(next_obs_f, normalizer_params) - s_n
+        if ensemble_pos_feature_fn is not None:
+            # Append φ(next position) — ABSOLUTE features of where the agent
+            # ends up (from RAW obs; φ's length scale is in meters). See
+            # ensemble.make_position_features for why absolute, why random.
+            target = jnp.concatenate([target, ensemble_pos_feature_fn(next_obs_f[:, _pos_idx])], axis=-1)
 
         # 1) Intrinsic reward from the PRE-update ensemble (reference ordering).
         r_int = (
@@ -812,6 +906,7 @@ def train(
             int_rew_rms=int_rew_rms,
             coverage_grid=coverage_grid,
             visit_counts=visit_counts,
+            head_visit_counts=head_visit_counts,
             interaction_count=interaction_count,
         )
 
@@ -863,7 +958,11 @@ def train(
         # output). mode() is the tanh-squashed mean action, so the cross-head
         # variance is in real action units [-1, 1] (the raw pre-tanh loc would
         # overstate diversity on saturated dims).
-        _s_sub = obs_f[:256]
+        # STRIDED subsample: rows are ordered (unroll_block, env, t), so a
+        # contiguous obs_f[:256] slice would be head 0's envs only — the common
+        # states must come from ALL heads' visited distributions.
+        _stride = max(1, obs_f.shape[0] // 256)
+        _s_sub = obs_f[::_stride][:256]
         _head_actions = jax.vmap(
             lambda h: parametric_action_distribution.mode(
                 _policy_apply(normalizer_params, {"trunk": params.policy["trunk"], "head": h}, _s_sub)
@@ -880,6 +979,29 @@ def train(
             # this keeps discriminating how EVENLY the state space is being explored.
             p = visit_counts / jnp.maximum(jnp.sum(visit_counts), 1.0)
             metrics["state_entropy"] = -jnp.sum(p * jnp.log(jnp.where(p > 0, p, 1.0))) / _cov_log_ncells
+        if _track_coverage and m_heads > 1:
+            # --- niche-partition diagnostics (multi-agent-ideas.md §9.4) ---
+            #   partition_ratio   — |∪ₕ cellsₕ| / Σₕ |cellsₕ| ∈ [1/m, 1] over the
+            #                       heads' lifetime VISITED sets: → 1 disjoint
+            #                       niches (heads tile the space), → 1/m identical
+            #                       heads (collapse). The cleanest single number.
+            #   head_occupancy_js — mean pairwise Jensen–Shannon divergence of the
+            #                       per-head visit DISTRIBUTIONS, normalized to
+            #                       [0, 1]: weights by time-in-cell rather than
+            #                       visited/not, so it keeps discriminating after
+            #                       the visited sets overlap.
+            head_occ = (head_visit_counts > 0).astype(jnp.float32)  # (m, ncells)
+            union = jnp.max(head_occ, axis=0)
+            metrics["partition_ratio"] = jnp.sum(union) / jnp.maximum(jnp.sum(head_occ), 1.0)
+            p_h = head_visit_counts / jnp.maximum(jnp.sum(head_visit_counts, axis=1, keepdims=True), 1.0)
+            p_i, p_j = p_h[:, None, :], p_h[None, :, :]
+            mix = jnp.maximum(0.5 * (p_i + p_j), 1e-12)
+
+            def _kl_to_mix(a):
+                return jnp.sum(a * jnp.log(jnp.where(a > 0, a / mix, 1.0)), axis=-1)
+
+            js = 0.5 * (_kl_to_mix(p_i) + _kl_to_mix(p_j)) / jnp.log(2.0)  # (m, m), diag 0
+            metrics["head_occupancy_js"] = jnp.sum(js) / (m_heads * (m_heads - 1))
         if _track_interaction:
             metrics["interaction_cumulative"] = interaction_count
 
@@ -969,6 +1091,7 @@ def train(
         int_rew_rms=jnp.ones(()),
         coverage_grid=jnp.zeros((_cov_grid_size,), jnp.float32),
         visit_counts=jnp.zeros((_cov_grid_size,), jnp.float32),
+        head_visit_counts=jnp.zeros((m_heads, _cov_grid_size), jnp.float32),
         interaction_count=jnp.zeros((), jnp.float32),
     )
 
@@ -1116,5 +1239,20 @@ def train(
         )
     )
     logging.info("total steps: %s", total_steps)
+
+    # Persist the LIFETIME per-cell visit grid (already accumulated every step
+    # for state_entropy — zero extra compute) so a coverage HEATMAP can be built
+    # post-hoc. One small array is copied off-device once, here at the end; no
+    # per-step or per-eval cost. train.py saves any "_coverage/*" arrays to an
+    # .npz next to the params. cell_xy places counts in maze coordinates.
+    if _track_coverage:
+        metrics = dict(metrics)
+        metrics["_coverage/visit_counts"] = np.asarray(_unpmap(training_state.visit_counts))
+        if m_heads > 1:
+            metrics["_coverage/head_visit_counts"] = np.asarray(_unpmap(training_state.head_visit_counts))
+        _cell_xy = getattr(_cov_env, "coverage_cell_xy", None)
+        if _cell_xy is not None:
+            metrics["_coverage/cell_xy"] = np.asarray(_cell_xy)
+
     pmap.synchronize_hosts()
     return (make_policy, params, metrics)

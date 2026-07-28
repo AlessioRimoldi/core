@@ -52,6 +52,10 @@ class SceneConfig:
     """Collection of scene objects with lookup helpers."""
 
     objects: list[SceneObject] = field(default_factory=list)
+    # Optional RGB (0–1) for the video-render skybox background, e.g.
+    # [0.7, 0.85, 1.0] = light blue. None → MuJoCo default. Cosmetic only
+    # (rendering); does not affect physics, obs, or the policy.
+    background: list[float] | None = None
 
     def get_by_name(self, name: str) -> SceneObject | None:
         for obj in self.objects:
@@ -77,7 +81,7 @@ def load_scene(path: str) -> SceneConfig:
         raw = yaml.safe_load(f)
 
     if not raw or "objects" not in raw:
-        return SceneConfig()
+        return SceneConfig(background=(raw or {}).get("background"))
 
     objects = []
     for obj_dict in raw["objects"]:
@@ -100,7 +104,7 @@ def load_scene(path: str) -> SceneConfig:
             )
         )
 
-    return SceneConfig(objects=objects)
+    return SceneConfig(objects=objects, background=raw.get("background"))
 
 
 def inject_scene_urdf(urdf_text: str, scene: SceneConfig) -> str:
