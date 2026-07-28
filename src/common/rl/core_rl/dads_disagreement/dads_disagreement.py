@@ -21,6 +21,7 @@ from collections.abc import Callable
 from typing import Any
 
 import jax
+import jax.numpy as jnp
 
 from core_rl.algorithms import (
     BaseAlgorithm,
@@ -34,7 +35,12 @@ from core_rl.algorithms import (
 from core_rl.dads.skill_autoreset import wrap_for_dads
 from core_rl.dads.skill_dynamics import make_skill_dynamics
 from core_rl.dads_disagreement import _dads_disagreement_sac
-from core_rl.disagreement.ensemble import build_reward_weights, make_ensemble
+from core_rl.disagreement.ensemble import (
+    build_reward_weights,
+    make_ensemble,
+    make_position_features,
+    resolve_obs_indices,
+)
 from core_rl.tasks import BaseTask
 
 # Keys consumed by this wrapper (DADS + disagreement), NOT passed through to the
@@ -61,6 +67,13 @@ _DISAGREEMENT_KEYS = {
     # Object-focused novelty: weight the disagreement bonus toward these obs dims.
     "ensemble_reward_indices",  # list[int] | "block" | None
     "ensemble_reward_bg_weight",  # weight on the OTHER dims (0 = restrict; >0 = keep bootstrap signal)
+    # Frozen random position features appended to the ensemble TARGET — "map
+    # content" novelty that survives even once Δ has been learned (see
+    # ensemble.make_position_features). 0 = off.
+    "ensemble_pos_features",  # int: number of φ target dims
+    "ensemble_pos_feature_scale",  # φ length scale, in the input dims' native units (default 1.5)
+    "ensemble_pos_indices",  # list[int] | "block_pos" (cube xyz only) | None (→ falls back to
+    # ensemble_reward_indices, matching the single-agent disagreement arm)
     # Hindsight skill relabeling (exploration data → skill supervision, HINDSIGHT.md).
     "hindsight_relabeling",  # master switch (bool)
     "relabel_mode",  # "direct" (z* = achieved outcome, HER-style) | "posterior" (EM)
@@ -196,11 +209,53 @@ class DADSDisagreementAlgorithm(BaseAlgorithm):
         if not isinstance(obs_size, int):
             raise ValueError(f"dads_disagreement requires a flat observation vector, got {obs_size!r}")
         beta = float(dis_cfg.get("beta", 0.0))
+
+        # ── frozen random position features (map-content novelty) ───────────
+        # Appended to the ensemble's prediction TARGET. Before first contact
+        # Δcube ≡ 0 for every (s, a), so the plain Δobs target gives the
+        # ensemble nothing to disagree about at the cube — every model agrees
+        # "it doesn't move" and the bonus never points there. φ(pos') is an
+        # independent random value at every unvisited position, learnable only
+        # by having gone there — this is what makes a rendered pixel target
+        # curiosity-inducing even for a still object; see ensemble.py and the
+        # single-agent disagreement arm, which uses the identical mechanism.
+        # `ensemble_pos_indices` picks φ's INPUT dims:
+        #   "block_pos" → the cube's (x, y, z) ONLY (not quat/cvel — those are
+        #                 in different units, so a single length_scale over a
+        #                 mixed pos+quat+cvel vector is not physically meaningful).
+        #   list[int]   → explicit dims.
+        #   None        → falls back to ensemble_reward_indices (parity with
+        #                 the single-agent disagreement arm's default wiring).
+        n_phi = int(dis_cfg.get("ensemble_pos_features", 0))
+        pos_fn = pos_idx = None
+        if n_phi > 0:
+            raw_pos_idx = dis_cfg.get("ensemble_pos_indices")
+            if raw_pos_idx == "block_pos":
+                block_idx = resolve_obs_indices(obs_size, "block", env=self._env)
+                if block_idx is None:
+                    raise ValueError(
+                        "ensemble_pos_indices='block_pos' needs a task exposing block_obs_indices (e.g. fetchpush)."
+                    )
+                pos_idx = block_idx[:3]  # position(3) is always the first 3 block dims
+            else:
+                pos_idx = resolve_obs_indices(
+                    obs_size,
+                    raw_pos_idx if raw_pos_idx is not None else dis_cfg.get("ensemble_reward_indices"),
+                    env=self._env,
+                )
+            if pos_idx is None:
+                raise ValueError(
+                    "ensemble_pos_features > 0 needs ensemble_pos_indices (or ensemble_reward_indices as a "
+                    "fallback) to define φ's input dims."
+                )
+            pos_fn = make_position_features(len(pos_idx), n_phi, float(dis_cfg.get("ensemble_pos_feature_scale", 1.5)))
+
         ensemble_network = make_ensemble(
             obs_size=obs_size,
             action_size=self._env.action_size,
             num_models=int(dis_cfg.get("num_models", 5)),
             hidden_layer_sizes=tuple(dis_cfg.get("ensemble_hidden_layer_sizes", (256, 256))),
+            target_size=obs_size + n_phi if n_phi else None,
         )
 
         # ── object-focused novelty weights (Pathak-style saliency for low-dim obs) ─
@@ -215,9 +270,15 @@ class DADSDisagreementAlgorithm(BaseAlgorithm):
             dis_cfg.get("ensemble_reward_indices"),
             float(dis_cfg.get("ensemble_reward_bg_weight", 0.0)),
         )
+        if ensemble_reward_weights is not None and n_phi > 0:
+            # φ dims get weight 1.0 (same footing as the focused obs dims).
+            ensemble_reward_weights = jnp.concatenate([ensemble_reward_weights, jnp.ones(n_phi, jnp.float32)])
         if ensemble_reward_weights is not None:
             focus = dis_cfg.get("ensemble_reward_indices")
-            print(f"  Disagreement focus:    {focus} (bg_weight={dis_cfg.get('ensemble_reward_bg_weight', 0.0)})")
+            print(
+                f"  Disagreement focus:    {focus} "
+                f"(bg_weight={dis_cfg.get('ensemble_reward_bg_weight', 0.0)}, pos_features={n_phi})"
+            )
         print(f"  Disagreement beta:     {beta}   (0 ⇒ vanilla DADS)")
         print(f"  Disagreement K:        {int(dis_cfg.get('num_models', 5))}   (ensemble size)")
         if dis_cfg.get("hindsight_relabeling"):
@@ -277,6 +338,8 @@ class DADSDisagreementAlgorithm(BaseAlgorithm):
             bootstrap_keep_prob=float(dis_cfg.get("bootstrap_keep_prob", 0.8)),
             int_rew_ema_tau=float(dis_cfg.get("int_rew_ema_tau", 0.05)),
             ensemble_reward_weights=ensemble_reward_weights,
+            ensemble_pos_feature_fn=pos_fn,
+            ensemble_pos_indices=pos_idx,
             # --- hindsight skill relabeling ---
             hindsight_relabeling=bool(dis_cfg.get("hindsight_relabeling", False)),
             relabel_mode=str(dis_cfg.get("relabel_mode", "direct")),

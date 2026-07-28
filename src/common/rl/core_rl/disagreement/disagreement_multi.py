@@ -17,6 +17,7 @@ from collections.abc import Callable
 from typing import Any
 
 import jax
+import jax.numpy as jnp
 
 from core_rl.algorithms import (
     BaseAlgorithm,
@@ -30,7 +31,12 @@ from core_rl.algorithms import (
 from core_rl.algorithms.ppo import _map_config
 from core_rl.dads.skill_autoreset import wrap_for_dads as wrap_resample_autoreset
 from core_rl.disagreement import multi_agent_disagreement_ppo
-from core_rl.disagreement.ensemble import build_reward_weights, make_ensemble
+from core_rl.disagreement.ensemble import (
+    build_reward_weights,
+    make_ensemble,
+    make_position_features,
+    resolve_obs_indices,
+)
 from core_rl.tasks import BaseTask
 
 # Keys consumed here, NOT passed through to the Brax-style trainer kwargs.
@@ -47,8 +53,13 @@ _DISAGREEMENT_KEYS = {
     "num_policy_heads",
     # Object-focused novelty (same knobs + semantics as the dads_disagreement arm,
     # via the shared build_reward_weights — keeps arm comparisons apples-to-apples).
+    # The weights are shared by the reward AND the ensemble loss.
     "ensemble_reward_indices",  # list[int] | "block" | None
     "ensemble_reward_bg_weight",  # weight on the OTHER dims (0 = restrict; >0 = keep bootstrap signal)
+    # Frozen random position features appended to the ensemble TARGET (map-content
+    # novelty — see ensemble.make_position_features). 0 = off.
+    "ensemble_pos_features",  # int: number of φ target dims
+    "ensemble_pos_feature_scale",  # φ length scale in meters (default 1.5)
 }
 
 
@@ -90,33 +101,52 @@ class MultiAgentDisagreementAlgorithm(BaseAlgorithm):
         brax_cfg["batch_size"] = batch_size
         brax_cfg["num_minibatches"] = num_minibatches
 
-        # Trunk/head sizes come from the same `network_factory_kwargs.hidden_layer_sizes`
-        # the other arms use. The multi-head trainer builds its own networks, so we
-        # do NOT construct a Brax network_factory — just forward the layer sizes.
+        # Trunk/head sizes come from the same `network_factory_kwargs` keys the
+        # other arms use (`hidden_layer_sizes`, or the Brax-native per-network
+        # `policy_/value_hidden_layer_sizes`). The multi-head trainer builds its
+        # own networks, so we do NOT construct a Brax network_factory — just
+        # forward the layer sizes.
         network_factory_kwargs = brax_cfg.pop("network_factory_kwargs", {}) or {}
         hidden = tuple(network_factory_kwargs.get("hidden_layer_sizes", (256, 256)))
+        policy_hidden = tuple(network_factory_kwargs.get("policy_hidden_layer_sizes", hidden))
+        value_hidden = tuple(network_factory_kwargs.get("value_hidden_layer_sizes", hidden))
 
         obs_size = self._env.observation_size
         if not isinstance(obs_size, int):
             raise ValueError(f"disagreement_multi requires a flat observation vector, got {obs_size!r}")
+
+        # Frozen random position features (map-content novelty; 0 = off). φ's
+        # input dims are the same dims ensemble_reward_indices names.
+        n_phi = int(dis_cfg.get("ensemble_pos_features", 0))
+        pos_fn = pos_idx = None
+        if n_phi > 0:
+            pos_idx = resolve_obs_indices(obs_size, dis_cfg.get("ensemble_reward_indices"), env=self._env)
+            if pos_idx is None:
+                raise ValueError("ensemble_pos_features > 0 requires ensemble_reward_indices (the φ input dims)")
+            pos_fn = make_position_features(len(pos_idx), n_phi, float(dis_cfg.get("ensemble_pos_feature_scale", 1.5)))
+
         ensemble_network = make_ensemble(
             obs_size=obs_size,
             action_size=self._env.action_size,
             num_models=int(dis_cfg.get("num_models", 5)),
             hidden_layer_sizes=tuple(dis_cfg.get("ensemble_hidden_layer_sizes", (256, 256))),
+            target_size=obs_size + n_phi if n_phi else None,
         )
 
-        # Object-focused novelty weights (None = uniform, unchanged behavior).
+        # Object-focused novelty weights (None = uniform, unchanged behavior),
+        # shared by the reward and the ensemble loss. φ dims get weight 1.0.
         ensemble_reward_weights = build_reward_weights(
             obs_size,
             dis_cfg.get("ensemble_reward_indices"),
             float(dis_cfg.get("ensemble_reward_bg_weight", 0.0)),
             env=self._env,
         )
+        if ensemble_reward_weights is not None and n_phi > 0:
+            ensemble_reward_weights = jnp.concatenate([ensemble_reward_weights, jnp.ones(n_phi, jnp.float32)])
         if ensemble_reward_weights is not None:
             print(
                 f"  Disagreement focus:    {dis_cfg.get('ensemble_reward_indices')} "
-                f"(bg_weight={dis_cfg.get('ensemble_reward_bg_weight', 0.0)})"
+                f"(bg_weight={dis_cfg.get('ensemble_reward_bg_weight', 0.0)}, pos_features={n_phi})"
             )
 
         resample_on_reset = bool(dis_cfg.get("resample_on_reset", False))
@@ -134,8 +164,8 @@ class MultiAgentDisagreementAlgorithm(BaseAlgorithm):
             policy_params_fn=self._policy_params_fn,
             # --- multi-agent (shared trunk + m policy heads) ---
             num_policy_heads=int(dis_cfg.get("num_policy_heads", 4)),
-            policy_hidden_layer_sizes=hidden,
-            value_hidden_layer_sizes=hidden,
+            policy_hidden_layer_sizes=policy_hidden,
+            value_hidden_layer_sizes=value_hidden,
             # --- disagreement ---
             ensemble_network=ensemble_network,
             ensemble_lr=float(dis_cfg.get("ensemble_lr", 3.0e-4)),
@@ -145,6 +175,8 @@ class MultiAgentDisagreementAlgorithm(BaseAlgorithm):
             ext_coeff=float(dis_cfg.get("ext_coeff", 0.0)),
             int_rew_ema_tau=float(dis_cfg.get("int_rew_ema_tau", 0.05)),
             ensemble_reward_weights=ensemble_reward_weights,
+            ensemble_pos_feature_fn=pos_fn,
+            ensemble_pos_indices=pos_idx,
             **brax_cfg,
         )
         return make_policy, params, metrics

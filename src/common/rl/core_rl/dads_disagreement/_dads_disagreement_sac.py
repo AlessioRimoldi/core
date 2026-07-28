@@ -254,10 +254,25 @@ def train(
     ensemble_train_steps: int = 8,
     bootstrap_keep_prob: float = 0.8,
     int_rew_ema_tau: float = 0.05,
-    # Optional per-obs-dim weights for the disagreement bonus (shape obs_size).
+    # Optional per-obs-dim weights for the disagreement bonus (shape = the
+    # ensemble's target_size, i.e. obs_size [+ len(ensemble_pos_feature_fn)
+    # output dims when position features are on]).
     # None = uniform mean over dims. Set to focus novelty on the object dims so
     # the agent gets curious about the cube rather than its own arm.
     ensemble_reward_weights: jnp.ndarray | None = None,
+    # Frozen random-Fourier position features appended to the ensemble's
+    # prediction TARGET (see core_rl.disagreement.ensemble.make_position_features
+    # and the single-agent disagreement arm, which uses the same mechanism).
+    # Δobs alone gives ZERO signal about a body that hasn't moved yet — before
+    # first contact the cube's Δ is identically 0 for every (s, a), so the
+    # ensemble agrees perfectly and the bonus never points at the cube. φ(pos')
+    # is an independent random value at every unvisited position, learnable
+    # only by having BEEN there — "map content" the raw Δ target cannot supply.
+    # None = off (unchanged behavior). ensemble_network must have been built
+    # with target_size = obs_size + len(pos_idx → φ output) for these to line
+    # up; the dads_disagreement wrapper does this.
+    ensemble_pos_feature_fn: Any = None,  # raw φ: (..., len(ensemble_pos_indices)) → (..., n_phi)
+    ensemble_pos_indices: Any = None,  # raw-obs dims fed to φ (required together with the fn)
     # --- hindsight skill relabeling (the exploration→skills interface) ---
     # Exploration data is z-UNCORRELATED (the novelty bonus ignores z), so
     # on-policy q_φ finds I(Δ;z)≈0 in it and skills never form (see HANDOVER.md).
@@ -284,6 +299,10 @@ def train(
     archive_qphi_frac: float = 0.5,  # fraction of each q_φ minibatch drawn from the archive (rest = fresh)
 ):
     """SAC training."""
+    if ensemble_pos_feature_fn is not None and ensemble_pos_indices is None:
+        raise ValueError("ensemble_pos_feature_fn requires ensemble_pos_indices")
+    _pos_idx = None if ensemble_pos_indices is None else jnp.asarray(ensemble_pos_indices, dtype=jnp.int32)
+
     process_id = jax.process_index()
     local_devices_to_use = jax.local_device_count()
     if max_devices_per_host is not None:
@@ -1082,6 +1101,13 @@ def train(
 
         s_n = running_statistics.normalize(fresh_transitions.observation, normalizer_params)
         target = running_statistics.normalize(fresh_transitions.next_observation, normalizer_params) - s_n
+        if ensemble_pos_feature_fn is not None:
+            # Append φ(next position) — from RAW (unnormalized) obs; φ's length
+            # scale is in the observation's native units. See the param docstring
+            # above and ensemble.make_position_features for why ABSOLUTE, not Δ.
+            target = jnp.concatenate(
+                [target, ensemble_pos_feature_fn(fresh_transitions.next_observation[:, _pos_idx])], axis=-1
+            )
         act = fresh_transitions.action
 
         # Reward-scale normalizer: EMA of mean(disagreement²) on the fresh batch,

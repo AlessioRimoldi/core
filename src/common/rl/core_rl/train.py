@@ -13,6 +13,7 @@ import argparse
 import os
 import time
 
+import numpy as np
 import tqdm
 import yaml
 
@@ -123,11 +124,17 @@ def main():
     print()
 
     # ── 1. Resolve robot ──
-    print(f"Resolving robot '{args.robot}'...")
+    # `--robot none` skips URDF resolution entirely for robot-free tasks
+    # (e.g. ant_maze, which builds its own MJCF); the task receives robot=None.
     scene = load_scene(args.scene_file) if args.scene_file else None
-    robot = resolve_robot(args.robot, scene=scene)
-    print(f"  Joints:     {robot.joint_names}")
-    print(f"  MJCF:       {robot.mjcf_path}")
+    if args.robot.lower() in ("none", "null"):
+        robot = None
+        print("Robot: none (robot-free task)")
+    else:
+        print(f"Resolving robot '{args.robot}'...")
+        robot = resolve_robot(args.robot, scene=scene)
+        print(f"  Joints:     {robot.joint_names}")
+        print(f"  MJCF:       {robot.mjcf_path}")
     if scene is not None:
         print(f"  Scene:      {len(scene.objects)} objects")
     print()
@@ -312,8 +319,27 @@ def main():
     algorithm.save(params_path, params)
     print(f"Params saved to {params_path}")
 
+    # ── 6b. Lifetime coverage grid (for post-hoc visit-count heatmaps) ──
+    # A disagreement trainer may attach its accumulated per-cell visit grid(s)
+    # under "_coverage/*" keys; dump them to a small .npz next to the params.
+    cov_path = None
+    cov_keys = [k for k in metrics if isinstance(k, str) and k.startswith("_coverage/")]
+    if cov_keys:
+        cov_path = os.path.join(output_dir, "coverage_grid.npz")
+        np.savez(cov_path, **{k.split("/", 1)[1]: np.asarray(metrics[k]) for k in cov_keys})
+        print(f"Coverage grid saved to {cov_path}")
+
     # ── 7. ONNX export ──
-    if export_cfg.get("onnx", False) and not args.no_export:
+    # The deployable pipeline (normalize → policy → PD) expects per-joint
+    # actions; skip export for non-joint action spaces (e.g. fetchpush
+    # action_mode="ee", where actions are 3-D Cartesian deltas that need the
+    # differential-IK layer at runtime).
+    if (robot is None or env.action_size != robot.num_joints) and export_cfg.get("onnx", False) and not args.no_export:
+        print(
+            f"Skipping ONNX export: no robot or non-joint action space "
+            f"(action_size={env.action_size}, num_joints={robot.num_joints if robot else 'n/a'})."
+        )
+    elif export_cfg.get("onnx", False) and not args.no_export:
         from core_rl.export_onnx import export_onnx
 
         print("\nExporting ONNX model...")
@@ -331,7 +357,7 @@ def main():
 
     # ── 8. Clean up hooks ──
     if mlflow_hook:
-        artifacts = [params_path]
+        artifacts = [params_path] + ([cov_path] if cov_path else [])
         mlflow_hook.end(artifact_paths=artifacts)
 
     if redis_hook:

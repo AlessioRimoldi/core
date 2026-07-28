@@ -24,10 +24,19 @@ For PAROL6 (num_joints=6) this is ``6 + 6 + 3 + 3 = 18`` dims, with
 ``block_pos`` at indices ``[15, 16, 17] = obs[..., -3:]`` and ``ee_pos`` at
 ``[12, 13, 14] = obs[..., -6:-3]``.
 
-Action: per-step joint *deltas* in ``[-1, 1]^num_joints``, scaled by
-``max_delta`` (radians) and added to the current joint pose. This avoids the
-"absolute-target-jitter" failure mode where a stochastic policy commands
-wildly different target positions at every control step.
+Action (``action_mode="joint"``, default): per-step joint *deltas* in
+``[-1, 1]^num_joints``, scaled by ``max_delta`` (radians) and added to the
+current joint pose. This avoids the "absolute-target-jitter" failure mode
+where a stochastic policy commands wildly different target positions at every
+control step.
+
+Action (``action_mode="ee"``): per-step *end-effector* deltas in
+``[-1, 1]^3``, scaled by ``max_ee_delta`` (meters) — the action space of the
+original OpenAI FetchPush. A damped-least-squares differential-IK step
+(resolved-rate control) maps the Cartesian delta to joint deltas each control
+step; the existing PD then tracks the resulting joint target. Exploration in
+EE space is geometrically aligned with pushing: a random walk sweeps the
+workspace instead of flailing in joint space.
 """
 
 from __future__ import annotations
@@ -38,6 +47,8 @@ from typing import Any
 import brax.envs.base as brax_env
 import jax
 import jax.numpy as jnp
+import mujoco
+import numpy as np
 from brax import base as brax_base
 
 from core_rl.robot import RobotConfig
@@ -54,7 +65,14 @@ class FetchPushTask(BaseTask):
         robot: RobotConfig,
         scene: SceneConfig | None = None,
         # ── Action: delta-position in joint space ──────────────────────────
-        max_delta: float = 0.20,  # rad per control step (≈ 11.4°/step)
+        max_delta: float = 0.20,  # rad per control step (≈ 11.4°/step); also the dq rate cap in ee mode
+        # ── Action mode: joint deltas (default) or end-effector deltas ─────
+        action_mode: str = "joint",  # "joint" (Δq, num_joints dims) | "ee" (Δee, 3 dims, differential IK)
+        max_ee_delta: float = 0.02,  # m per control step (ee mode)
+        ik_damping: float = 0.05,  # DLS damping λ — bounds dq near singularities (ee mode)
+        ik_posture_gain: float = 0.05,  # nullspace pull toward the init pose, rad/step (ee mode)
+        ee_workspace_lo: Sequence[float] = (0.05, -0.40, 0.005),  # EE target box, world frame (ee mode)
+        ee_workspace_hi: Sequence[float] = (0.55, 0.40, 0.40),
         # ── Reward shaping (eval-only under ext_coeff=0) ───────────────────
         proximity_reward_scale: float = 1.0,
         proximity_sigma: float = 0.05,
@@ -70,6 +88,12 @@ class FetchPushTask(BaseTask):
         max_episode_steps: int = 200,
         init_pose: Sequence[float] | None = None,
         init_noise: float = 0.10,  # ± rad uniform jitter on init q
+        # Start the EE near the block instead of at joint mid-range (which
+        # parks the EE ~35-40cm away). Ignored if init_pose is set explicitly.
+        # Solved ONCE at construction via CPU MuJoCo differential IK (see
+        # _solve_ee_ik_numpy) — not part of the JAX training graph.
+        init_near_target: bool = False,
+        init_target_offset: Sequence[float] = (-0.08, 0.0, 0.05),  # world-frame offset from the block's nominal pos
         # ── Richer block state (harder for a forward model to predict → more
         #    "curious" per Pathak 2019: a manipulated object should be a salient,
         #    complex source of prediction disagreement). Appends the block's
@@ -93,6 +117,22 @@ class FetchPushTask(BaseTask):
 
         self.max_delta = float(max_delta)
 
+        if action_mode not in ("joint", "ee"):
+            raise ValueError(f"action_mode must be 'joint' or 'ee', got {action_mode!r}")
+        self.action_mode = action_mode
+        self.max_ee_delta = float(max_ee_delta)
+        self.ik_damping = float(ik_damping)
+        self.ik_posture_gain = float(ik_posture_gain)
+        self._ws_lo = jnp.asarray(ee_workspace_lo, dtype=jnp.float32)
+        self._ws_hi = jnp.asarray(ee_workspace_hi, dtype=jnp.float32)
+        # MuJoCo joint ids of the arm joints — xanchor/xaxis are jnt-id-indexed
+        # (used by the geometric Jacobian in ee mode). BaseTask already
+        # validated that every robot joint exists in the model.
+        self._arm_jnt_ids = jnp.array(
+            [mujoco.mj_name2id(self._mj_model, mujoco.mjtObj.mjOBJ_JOINT, name) for name in robot.joint_names],
+            dtype=jnp.int32,
+        )
+
         self.proximity_reward_scale = float(proximity_reward_scale)
         self.proximity_sigma = float(proximity_sigma)
         self.velocity_penalty = float(velocity_penalty)
@@ -106,15 +146,23 @@ class FetchPushTask(BaseTask):
         self._block_body_id = self._scene_body_ids[block_obj.name]
         self._block_name = block_obj.name
 
-        # Init pose: midpoint of joint range (or user-supplied) + uniform jitter.
+        # Init pose: midpoint of joint range (default), user-supplied, or
+        # (init_near_target) solved so the EE starts near the block — a random
+        # walk from mid-range starts ~35-40cm from the cube (see
+        # EXPERIMENT_FETCHPUSH.md's "ignition" discussion: disagreement cannot
+        # point toward an object that has never moved, so first contact is an
+        # undirected search on a clock; starting closer shrinks that search).
         mid = (self._q_lower + self._q_upper) / 2.0
-        if init_pose is None:
-            self._init_q = mid
-        else:
+        if init_pose is not None:
             init_q = jnp.asarray(init_pose, dtype=jnp.float32)
             if init_q.shape != (self.robot.num_joints,):
                 raise ValueError(f"init_pose must have shape ({self.robot.num_joints},), " f"got {tuple(init_q.shape)}")
             self._init_q = init_q
+        elif init_near_target:
+            target = np.asarray(block_obj.position, dtype=np.float64) + np.asarray(init_target_offset, dtype=np.float64)
+            self._init_q = self._solve_ee_ik_numpy(target, seed_q=np.asarray(mid))
+        else:
+            self._init_q = mid
         self._init_noise = float(init_noise)
 
         # --- exploration coverage grid over the 2-D table area (block x, y) ---
@@ -156,7 +204,8 @@ class FetchPushTask(BaseTask):
 
     @property
     def action_size(self) -> int:
-        return self.robot.num_joints
+        # ee mode: 3-D Cartesian delta; joint mode: one delta per joint.
+        return 3 if self.action_mode == "ee" else self.robot.num_joints
 
     # ── exploration hooks (read by the disagreement trainers) ───────────
     @property
@@ -228,11 +277,16 @@ class FetchPushTask(BaseTask):
         pipeline_state = state.pipeline_state
         prev_q_target = state.info["prev_q_target"]
 
-        # ── Action: delta-position in joint space ──
-        # Random initial actions ⇒ small local moves the PD can track ⇒
-        # actual exploration (instead of jitter around mid_range).
+        # ── Action → joint-space delta ──
+        # Both modes command small local moves the PD can track ⇒ actual
+        # exploration (instead of jitter around mid_range). ee mode maps the
+        # Cartesian delta through one differential-IK step first.
         q_current = self._get_joint_q(pipeline_state)
-        q_target = jnp.clip(q_current + self.max_delta * action, self._q_lower, self._q_upper)
+        if self.action_mode == "ee":
+            dq = self._ee_action_to_dq(pipeline_state, q_current, action)
+        else:
+            dq = self.max_delta * action
+        q_target = jnp.clip(q_current + dq, self._q_lower, self._q_upper)
 
         next_pipeline_state = self.pipeline_step_pd(pipeline_state, q_target)
 
@@ -278,6 +332,83 @@ class FetchPushTask(BaseTask):
         return brax_env.State(next_pipeline_state, obs, reward, done, metrics, info)
 
     # ── helpers ────────────────────────────────────────────────────────
+    def _solve_ee_ik_numpy(
+        self,
+        target_pos: np.ndarray,
+        seed_q: np.ndarray,
+        iters: int = 200,
+        damping: float = 0.1,
+    ) -> jax.Array:
+        """One-time DLS IK solve (CPU MuJoCo, plain NumPy) for a joint pose
+        whose EE sits at ``target_pos``. Runs ONCE at task construction
+        (``init_near_target``) — not JIT-traced, not part of the training
+        graph. Same damped-least-squares formula as :meth:`_ee_action_to_dq`,
+        iterated to convergence here instead of taken as one training step.
+        """
+        d = mujoco.MjData(self._mj_model)
+        q = np.array(seed_q, dtype=np.float64)
+        q_idx = np.asarray(self._joint_q_indices)
+        jnt_ids = np.asarray(self._arm_jnt_ids)
+        lower = np.asarray(self._q_lower, dtype=np.float64)
+        upper = np.asarray(self._q_upper, dtype=np.float64)
+        # Start from the model's default qpos (valid unit quaternions for any
+        # free-jointed scene objects) so mj_kinematics never sees degenerate
+        # state; only the arm's own slots are overwritten each iteration.
+        full_q = np.array(self._mj_model.qpos0, dtype=np.float64)
+        for _ in range(iters):
+            full_q[q_idx] = q
+            d.qpos[:] = full_q
+            mujoco.mj_kinematics(self._mj_model, d)
+            ee = d.xpos[self._ee_body_id].copy()
+            err = target_pos - ee
+            if np.linalg.norm(err) < 1e-4:
+                break
+            anchors = d.xanchor[jnt_ids]
+            axes = d.xaxis[jnt_ids]
+            jac = np.cross(axes, ee - anchors).T  # (3, n)
+            a_inv = np.linalg.inv(jac @ jac.T + damping**2 * np.eye(3))
+            dq = jac.T @ a_inv @ err
+            q = np.clip(q + dq, lower, upper)
+        return jnp.asarray(q, dtype=jnp.float32)
+
+    def _ee_action_to_dq(
+        self,
+        pipeline_state: brax_base.State,
+        q_current: jax.Array,
+        action: jax.Array,
+    ) -> jax.Array:
+        """Resolved-rate (differential-IK) action: Cartesian Δee → joint deltas.
+
+        ``action ∈ [-1, 1]³`` commands an end-effector step
+        ``Δee = max_ee_delta · action``, clamped so the commanded EE target
+        stays inside the workspace box. One damped-least-squares step maps it
+        to joint space:
+
+            dq = Jᵀ (J Jᵀ + λ² I₃)⁻¹ Δee  +  (I − J⁺J) · k_post (q_init − q)
+
+        ``J`` is the geometric position Jacobian assembled from the CURRENT
+        state — revolute joint i contributes column ``axis_i × (ee − anchor_i)``,
+        and ``xaxis``/``xanchor`` are already computed by MJX kinematics, so
+        this costs no extra FK pass. The damping bounds dq near singularities;
+        the nullspace term keeps the 3 redundant DOFs near the init posture
+        instead of drifting. dq is finally rate-capped at ±``max_delta`` — the
+        same per-step joint budget as the joint mode.
+        """
+        ee = self._get_ee_pos(pipeline_state)
+        ee_target = jnp.clip(ee + self.max_ee_delta * action, self._ws_lo, self._ws_hi)
+        delta = ee_target - ee
+
+        anchors = pipeline_state.xanchor[self._arm_jnt_ids]  # (n, 3) world joint anchors
+        axes = pipeline_state.xaxis[self._arm_jnt_ids]  # (n, 3) world joint axes
+        jac = jnp.cross(axes, ee - anchors).T  # (3, n)
+
+        a_inv = jnp.linalg.inv(jac @ jac.T + (self.ik_damping**2) * jnp.eye(3))
+        jac_pinv = jac.T @ a_inv  # damped pseudoinverse (n, 3)
+        dq = jac_pinv @ delta
+        nullspace = jnp.eye(q_current.shape[0]) - jac_pinv @ jac
+        dq = dq + nullspace @ (self.ik_posture_gain * (self._init_q - q_current))
+        return jnp.clip(dq, -self.max_delta, self.max_delta)
+
     def _compute_obs(
         self,
         pipeline_state: brax_base.State,
